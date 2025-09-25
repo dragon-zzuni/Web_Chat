@@ -48,6 +48,11 @@ function initChat({room, name, password, hooks={}}) {
   
     ws.onopen = () => {
       ws.send(JSON.stringify({type:"join", room, username:myName, password, color: myColor}));
+      
+      // 알림 권한 요청
+      if (window.Notification && Notification.permission === 'default') {
+        Notification.requestPermission();
+      }
     };
   
     ws.onmessage = (ev) => {
@@ -64,12 +69,32 @@ function initChat({room, name, password, hooks={}}) {
           const label = `<b style="color:${esc(color)}">${esc(d.from)}</b>`;
           addLine(`<div class="chatline ${self?'me':''}">${label}: <span class="bubble">${esc(d.message)}</span></div>`);
           if(!self) bumpUnread();
+
+          // 멘션 알림 처리
+          if (d.message.includes('@' + myName)) {
+            if (window.Notification && Notification.permission === 'granted') {
+              new Notification(`'${room}' 방에서 새 멘션`, {
+                body: `${d.from}: ${d.message}`
+              });
+            }
+          }
         }else if(d.type === 'file'){
           const self = d.from === myName;
           const color = d.color || '#1a73e8';
           const label = `<b style="color:${esc(color)}">${esc(d.from)}</b>`;
-          const link = `<a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.filename || '파일')}</a>`;
-          addLine(`<div class="chatline ${self?'me':''}">${label}: 📎 ${link}</div>`);
+          
+          const isImage = /\.(jpe?g|png|gif|webp|bmp|svg)$/i.test(d.filename || '');
+          let fileElement;
+
+          if (isImage) {
+            fileElement = `<a href="${esc(d.url)}" target="_blank" rel="noopener">
+                             <img src="${esc(d.url)}" alt="${esc(d.filename)}" style="max-width: 300px; max-height: 250px; border-radius: 8px; margin-top: 4px; display: block;">
+                           </a>`;
+          } else {
+            fileElement = `📎 <a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.filename || '파일')}</a>`;
+          }
+
+          addLine(`<div class="chatline ${self?'me':''}">${label}: ${fileElement}</div>`);
           if(!self) bumpUnread();
         }
       }catch(e){}
