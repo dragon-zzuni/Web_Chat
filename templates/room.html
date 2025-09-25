@@ -1,0 +1,150 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>{{ room }} 채팅방</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root{ --bg:#fff; --text:#222; --muted:#666; --border:#e5e7eb; --chip:#f3f4f6; }
+      *{box-sizing:border-box}
+      body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Noto Sans KR,sans-serif; margin:0; color:var(--text); background:var(--bg);}
+      a{color:#1a73e8; text-decoration:none} a:hover{text-decoration:underline}
+
+      /* 헤더 (구글 검색 느낌) */
+      .gbar{display:flex; align-items:center; gap:14px; padding:10px 14px; border-bottom:1px solid var(--border); position:sticky; top:0; background:#fff; z-index:5;}
+      .glogo img{height:28px}
+      .gsearch{flex:1; display:flex; align-items:center; gap:8px; background:#f1f3f4; border-radius:24px; padding:8px 14px;}
+      .gsearch input{flex:1; border:none; background:transparent; outline:none; font-size:15px;}
+      .gmenu{display:flex; align-items:center; gap:8px;}
+      .gmenu button,.gmenu a{border:1px solid var(--border); background:#fff; padding:6px 10px; border-radius:10px; font-size:13px; cursor:pointer}
+      .gmenu button:hover,.gmenu a:hover{background:#f8f9fa}
+
+      /* 본문 레이아웃 */
+      .layout{max-width:1200px; margin:18px auto; padding:0 16px; display:flex; gap:20px; align-items:flex-start;}
+      .left{flex:0 0 300px; border-right:1px solid var(--border); padding-right:16px;}
+      .right{flex:1 1 auto;}
+
+      #log{border:1px solid var(--border); background:#fff; height:460px; overflow:auto; padding:14px; border-radius:12px;}
+      .sys{color:var(--muted); margin:6px 0;}
+      .chatline{margin:6px 0;}
+      .me b{color:#1a73e8}
+      .bubble{display:inline-block; background:#f8f9fa; padding:6px 10px; border-radius:12px;}
+      .row{display:flex; gap:8px; margin-top:10px;}
+      .row input[type="text"]{flex:1; padding:10px; border:1px solid var(--border); border-radius:10px; font-size:14px;}
+      .row button{padding:10px 14px; border:1px solid var(--border); border-radius:10px; background:#fff; cursor:pointer}
+      .row button:hover{background:#f8f9fa}
+
+      /* 파일 첨부 라인 */
+      .attach{display:flex; align-items:center; gap:8px; margin-top:10px; font-size:13px;}
+      .chip{display:inline-block; background:var(--chip); border:1px dashed var(--border); padding:6px 10px; border-radius:10px}
+
+      /* 반응형: 화면 좁으면 왼쪽 패널 숨김 */
+      @media (max-width: 1000px){
+        .layout{gap:0}
+        .left{display:none}
+      }
+    </style>
+  </head>
+  <body>
+    <!-- 상단 바 -->
+    <div class="gbar">
+      <div class="glogo">
+        <a href="https://www.google.com" target="_blank" rel="noopener" class="glogo-link">
+          <img alt="Google" src="https://www.google.com/images/branding/googlelogo/1x/googlelogo_color_92x30dp.png">
+        </a>
+      </div>
+
+      <!-- 검색바 모양: 방 이름 표시 -->
+      <div class="gsearch" title="현재 방 이름">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="#5f6368" aria-hidden="true"><path d="M15.5 14h-.79l-.28-.27a6.471 6.471 0 001.48-5.34C15.17 5.59 12.53 3 9.25 3S3.33 5.59 3.33 8.39 5.97 13.78 9.25 13.78c1.61 0 3.09-.59 4.22-1.57l.27.28v.79l4.25 4.25c.41.41 1.08.41 1.49 0 .41-.41.41-1.08 0-1.49L15.5 14zm-6.25 0C6.18 14 4 11.82 4 9.25S6.18 4.5 8.75 4.5 13.5 6.68 13.5 9.25 11.32 14 8.75 14z"/></svg>
+        <input id="roomNameDisplay" value="{{ room }}" readonly>
+      </div>
+
+      <div class="gmenu">
+        <button id="btnLeave">방 나가기</button>
+        <button id="btnRename">닉네임 바꾸기</button>
+        <input id="nameColor" type="color" value="#1a73e8" title="닉네임 색상" style="width:38px;height:32px;padding:0;border:1px solid #e5e7eb;border-radius:8px;cursor:pointer;">
+        <a href="https://www.naver.com" target="_blank" rel="noopener">Naver</a>
+        <a href="https://www.google.com" target="_blank" rel="noopener">Google</a>
+      </div>
+    </div>
+
+    <!-- 본문 -->
+    <div class="layout">
+      <!-- 왼쪽: 구글 검색 패널 -->
+      <!-- 왼쪽: 검색 패널 -->
+    <aside class="left">
+        <form id="googleSearchForm" action="https://www.google.com/search" method="GET" target="_blank">
+        <input type="text" name="q" value="챗지피티"
+                style="width:100%; padding:8px 10px; border:1px solid var(--border); border-radius:8px;">
+        <button type="submit" style="margin-top:8px; width:100%; padding:8px 10px; border:1px solid var(--border); border-radius:8px; background:#fff; cursor:pointer;">
+            🔍 구글에서 검색
+        </button>
+        </form>
+    
+        <div style="margin-top:12px; border:1px solid var(--border); border-radius:8px; overflow:hidden;">
+        <!-- ⚠️ 구글 대신 DDG lite를 iframe 미리보기로 사용 -->
+        <iframe id="searchPreview"
+                src="https://www.google.com/search?q=챗지피티"
+                style="width:100%; height:360px; border:0;"></iframe>
+        </div>
+    
+        <!-- 미리보기 내에서 검색(iframe 갱신용) -->
+        <form id="previewSearch" style="margin-top:8px;">
+        <input id="previewQuery" type="text" placeholder="미리보기에서 검색…" value="챗지피티"
+                style="width:100%; padding:6px 8px; border:1px solid var(--border); border-radius:8px;">
+        </form>
+    </aside>
+  
+
+      <!-- 오른쪽: 채팅 UI -->
+      <main class="right">
+        <div id="log"></div>
+
+        <div class="row">
+          <input id="msg" type="text" placeholder="메시지를 입력..." />
+          <button id="send">전송</button>
+        </div>
+
+        <div class="attach">
+          <input id="file" type="file">
+          <button id="sendFile">파일 전송</button>
+          <span class="chip">허용: 모든 파일(내부 공유)</span>
+        </div>
+      </main>
+    </div>
+
+    <script src="/static/client.js"></script>
+    <script>
+      // 왼쪽 검색창 제출 시 미리보기 iframe도 갱신
+      document.getElementById('googleSearchForm').addEventListener('submit', function(e){
+        e.preventDefault();
+        const q = this.q.value.trim() || '챗지피티';
+        document.getElementById('googlePreview').src =
+          "https://www.google.com/search?q=" + encodeURIComponent(q);
+      });
+
+      // 방 초기화 (기존 로직 유지)
+      const room = "{{ room }}";
+      const [_, nameHash, pwHash] = (location.hash || "#anon#").split('#');
+      const initName = decodeURIComponent(nameHash || 'anon');
+      const initPw = decodeURIComponent(pwHash || '');
+
+      initChat({
+        room,
+        name: initName,
+        password: initPw,
+        hooks:{
+          leave: ()=> location.href = '/',
+          rename: async (getCurrentName, setName)=>{
+            const now = getCurrentName();
+            const next = prompt('새 닉네임을 입력하세요', now || '');
+            if(next && next.trim() && next.trim() !== now){
+              setName(next.trim());
+            }
+          }
+        }
+      });
+    </script>
+  </body>
+</html>

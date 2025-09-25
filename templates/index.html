@@ -1,0 +1,193 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>사내 메신저</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root{
+        --bg:#fff; --text:#202124; --muted:#5f6368; --border:#dadce0;
+        --btn:#1a73e8; --btn-hover:#185abc;
+      }
+      *{box-sizing:border-box}
+      body{margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Noto Sans KR,sans-serif; color:var(--text); background:var(--bg);}
+      a{color:#1a73e8; text-decoration:none}
+      a:hover{text-decoration:underline}
+
+      .wrap{min-height:100vh; display:flex; align-items:center; justify-content:center;}
+      .card{width: 380px; border:1px solid var(--border); border-radius:12px; padding:32px 28px; box-shadow:0 1px 2px rgba(0,0,0,.04);}
+      .logo{display:flex; justify-content:center; margin-bottom:24px;}
+      .logo img{height:28px}
+      h1{font-size:22px; font-weight:500; text-align:center; margin:0 0 18px}
+      .hint{font-size:12px; color:var(--muted); text-align:center; margin-bottom:18px}
+
+      label{display:block; font-size:12px; color:var(--muted); margin:10px 0 6px;}
+      input[type=text], input[type=password]{width:100%; padding:12px; border:1px solid var(--border); border-radius:8px; font-size:14px;}
+      .btn{width:100%; margin-top:18px; padding:10px 12px; font-size:14px; color:#fff; background:var(--btn); border:none; border-radius:8px; cursor:pointer}
+      .btn:hover{background:var(--btn-hover);}
+      .split{display:flex; gap:10px; align-items:center; margin:18px 0;}
+      .split:before,.split:after{content:""; flex:1; height:1px; background:var(--border);}
+      .rooms{margin-top:8px}
+      .rooms ul{margin:6px 0 0 18px; padding:0}
+      .rooms li{margin:2px 0}
+      .mini{font-size:12px; color:var(--muted);}
+
+      .admin{margin-top:16px; border-top:1px solid var(--border); padding-top:12px;}
+      .admin input{width:100%; padding:10px; border:1px dashed var(--border); border-radius:8px;}
+      .actions{display:flex; gap:8px; margin-top:8px; justify-content:flex-end;}
+      .actions button{border:1px solid var(--border); background:#fff; padding:6px 10px; border-radius:8px; cursor:pointer}
+      .actions button:hover{background:#f8f9fa;}
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <div class="logo">
+          <img alt="Google" src="https://www.google.com/images/branding/googlelogo/1x/googlelogo_color_92x30dp.png">
+        </div>
+        <h1>사내 메신저 로그인</h1>
+        <div class="hint">방 이름/닉네임/비밀번호를 입력해 입장하세요.</div>
+
+        <label>방 이름</label>
+        <input id="room" type="text" placeholder="예: 놀이방">
+
+        <label>닉네임</label>
+        <input id="name" type="text" placeholder="예: FAKER ">
+
+        <label>방 비밀번호</label>
+        <input id="pw" type="password" placeholder="room password">
+
+        <button class="btn" onclick="go()">입장</button>
+
+        <div class="split"><span class="mini">또는</span></div>
+
+        <!-- 방 생성 -->
+        <label>새 방 이름</label>
+        <input id="newRoom" type="text" placeholder="예: secret-room">
+        <label>새 비밀번호</label>
+        <input id="newPw" type="password" placeholder="원하는 비밀번호">
+        <div class="actions">
+          <button onclick="createRoom()">방 만들기</button>
+        </div>
+
+        <div class="rooms">
+          <div class="mini">방 목록(클릭하면 자동 입력)</div>
+          <ul id="roomList"><li class="mini">불러오는 중...</li></ul>
+        </div>
+
+        <div class="admin">
+          <div class="mini">관리 토큰(방 삭제 시 필요)</div>
+          <input id="adminToken" placeholder="ADMIN_TOKEN">
+        </div>
+      </div>
+    </div>
+
+    <script>
+        function renderRooms(rooms){
+          const ul = document.getElementById('roomList');
+          if (!ul) return;            // DOM 아직이면 그냥 리턴
+          ul.innerHTML = '';
+          rooms.forEach(name=>{
+            const li = document.createElement('li');
+      
+            // 방 이름 클릭 → 상단 폼에 자동 채움
+            const a = document.createElement('a');
+            a.href = '#';
+            a.textContent = name;
+            a.onclick = ()=>{
+              const r = document.getElementById('room');
+              const n = document.getElementById('name');
+              if (r) r.value = name;
+              if (n) n.focus();
+            };
+            li.appendChild(a);
+      
+            // 삭제 버튼
+            const del = document.createElement('button');
+            del.textContent = '삭제';
+            del.style.marginLeft = '8px';
+            del.onclick = async ()=>{
+              const tokenEl = document.getElementById('adminToken');
+              const token = tokenEl ? tokenEl.value.trim() : '';
+              if(!token){ alert('관리 토큰을 입력하세요.'); return; }
+              if(!confirm(`정말 '${name}' 방을 삭제하시겠습니까?`)) return;
+      
+              try{
+                const res = await fetch(`/api/rooms/${encodeURIComponent(name)}`, {
+                  method: 'DELETE',
+                  headers: {'X-Admin-Token': token}
+                });
+                const body = await res.json().catch(()=>({}));
+                if(!res.ok){ alert(`삭제 실패: ${body.detail || res.status}`); return; }
+                alert(`'${name}' 삭제 완료`);
+                fetchRooms(); // 목록 갱신
+              }catch(e){
+                alert('에러: ' + e);
+              }
+            };
+            li.appendChild(del);
+      
+            ul.appendChild(li);
+          });
+        }
+      
+        async function fetchRooms(){
+          try{
+            const res = await fetch('/api/rooms');
+            if(!res.ok) throw new Error('API '+res.status);
+            const j = await res.json();
+            renderRooms(j.rooms || []);
+          }catch(e){
+            const ul = document.getElementById('roomList');
+            if (ul) ul.innerHTML = '<li class="mini">목록을 불러오지 못했습니다.</li>';
+            console.error('fetchRooms error:', e);
+          }
+        }
+      
+        // ✅ 반드시 호출되게: DOM 준비되면 호출
+        window.addEventListener('DOMContentLoaded', fetchRooms);
+
+        async function createRoom(){
+            const r = document.getElementById('newRoom').value.trim();
+            const p = document.getElementById('newPw').value.trim();
+            if(!r || !p){ alert('방 이름/비밀번호를 입력하세요.'); return; }
+
+            try{
+            const res = await fetch('/api/rooms', {
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({ name: r, password: p })   // 서버: POST /api/rooms
+            });
+            const body = await res.json().catch(()=>({}));
+            if(!res.ok){ alert('생성 실패: ' + (body.detail || res.status)); return; }
+
+            alert(`'${r}' 방이 생성되었습니다.`);
+            document.getElementById('room').value = r;         // 위쪽 입장 폼에 자동 채움
+            document.getElementById('name').focus();
+            fetchRooms();                                      // 목록 갱신
+            }catch(e){
+            alert('에러: ' + e);
+            }
+        }
+
+        // 입장 (방/닉네임/비번 → /room?room=...#닉#비)
+        function go(){
+            const r = document.getElementById('room').value.trim();
+            const n = document.getElementById('name').value.trim();
+            const p = document.getElementById('pw').value.trim();
+            if(!r || !n || !p){ alert('방/닉네임/비밀번호를 모두 입력하세요.'); return; }
+
+            // 한글/공백 대응
+            location.href = `/room?room=${encodeURIComponent(r)}#${encodeURIComponent(n)}#${encodeURIComponent(p)}`;
+        }
+
+        // 엔터키로 입장
+        window.addEventListener('DOMContentLoaded', ()=>{
+            fetchRooms();
+            const pw = document.getElementById('pw');
+            if(pw){ pw.addEventListener('keydown', e => { if(e.key==='Enter') go(); }); }
+        });
+      </script>
+      
+  </body>
+</html>
