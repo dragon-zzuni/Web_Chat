@@ -15,7 +15,7 @@ from database import (
     add_room, get_room_password, get_all_rooms, delete_room_db, room_exists
 )
 
-PROTECTED_ROOMS = {"dev", "general"} # These rooms cannot be deleted
+PROTECTED_ROOMS = {"구글"} # These rooms cannot be deleted
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "del")
 
 app = FastAPI()
