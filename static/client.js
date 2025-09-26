@@ -160,20 +160,62 @@ function initChat({room, name, password, hooks={}}) {
     return null;
   }
 
-  document.addEventListener('paste', async (e) => {
-    const imageFile = findClipboardImageFromEvent(e);
-    if (!imageFile) return;
-    e.preventDefault();
-    const sig = fileSignature(imageFile);
-    if (sig === lastPastedSignature) return;
-    lastPastedSignature = sig;
-    const timestamp = new Date().toISOString().replace(/[-:.]/g, '');
-    const ext = (imageFile.type.split('/')[1] || 'png').toLowerCase();
-    const fileName = `clipboard-${timestamp}.${ext}`;
-    const newFile = new File([imageFile], fileName, { type: imageFile.type || 'image/png' });
-    const ok = confirm('클립보드의 이미지를 전송하시겠습니까?');
-    if (ok) await sendFile(newFile);
-  });
+    document.addEventListener('paste', async (e) => {
+      const items = e.clipboardData.items;
+      if (!items) return;
+
+      const imageItem = Array.from(items).find(item => item.type.startsWith('image/'));
+      if (!imageItem) return; // 이미지가 아니면 기본 동작을 막지 않음
+
+      // 이미지가 있으면 기본 붙여넣기 동작(예: contenteditable에 이미지 태그 삽입)을 막음
+      e.preventDefault();
+      
+      const imageFile = imageItem.getAsFile();
+      const timestamp = new Date().toISOString().replace(/[-:.]/g, '');
+      const fileName = `clipboard-${timestamp}.png`;
+      const newFile = new File([imageFile], fileName, {type: imageFile.type});
+
+      if (confirm('클립보드의 이미지를 전송하시겠습니까? (Send image from clipboard?)')) {
+        await sendFile(newFile);
+      }
+    });
+
+    // 드래그 앤 드롭 파일 업로드
+    const dropOverlay = document.getElementById('drop-overlay');
+
+    document.body.addEventListener('dragenter', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dropOverlay.style.display = 'flex';
+    });
+
+    dropOverlay.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+    });
+
+    dropOverlay.addEventListener('dragleave', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.target === dropOverlay) {
+            dropOverlay.style.display = 'none';
+        }
+    });
+
+    dropOverlay.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dropOverlay.style.display = 'none';
+
+        const files = e.dataTransfer.files;
+        if (files.length > 0) {
+            if (confirm(`총 ${files.length}개의 파일을 전송하시겠습니까? (Upload ${files.length} file(s)?)`)) {
+                for (const file of files) {
+                    await sendFile(file);
+                }
+            }
+        }
+    });
 
   // --- Async Clipboard API button (secure context, user gesture required) ---
   pasteBtn?.addEventListener('click', async () => {
