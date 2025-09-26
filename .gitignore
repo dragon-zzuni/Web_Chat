@@ -6,6 +6,8 @@ __pycache__/
 # data files
 ./uploads/*
 uploads/*
+./data/*
+data/*
 
 # passwords
 ./room_passwords.json
