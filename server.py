@@ -35,7 +35,7 @@ def save_rooms(rooms_dict):
         json.dump(rooms_dict, f, ensure_ascii=False, indent=2)
 
 ROOM_PASSWORDS = load_rooms()
-rooms: Dict[str, Set[WebSocket]] = {}
+rooms: Dict[str, Dict[WebSocket, str]] = {}
 
 
 async def room_auth(room: str, password: str):
@@ -87,6 +87,12 @@ def room_page(request: Request, room: str):
     # 방 존재 체크를 프론트에서 막지 말고, WS에서 비번 검증으로 처리
     return templates.TemplateResponse("room.html", {"request": request, "room": room})
 
+async def broadcast_participants(room: str):
+    if room in rooms:
+        participants = list(rooms[room].values())
+        await broadcast(room, {"type": "participants", "users": sorted(participants)})
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
@@ -106,8 +112,9 @@ async def websocket_endpoint(ws: WebSocket):
             await ws.send_json({"type": "error", "message": e.detail})
             await ws.close(code=4001); return
 
-        rooms.setdefault(room, set()).add(ws)
+        rooms.setdefault(room, {})[ws] = username
         await broadcast(room, {"type": "system", "message": f"{username}님이 입장했습니다."})
+        await broadcast_participants(room)
 
         while True:
             data = await ws.receive_json()
@@ -124,29 +131,38 @@ async def websocket_endpoint(ws: WebSocket):
                 if new_name and new_name != username:
                     old = username
                     username = new_name
+                    rooms[room][ws] = new_name
                     await broadcast(room, {"type": "system", "message": f"{old} → {username} 닉네임 변경"})
+                    await broadcast_participants(room)
 
             elif t == "ping":
                 await ws.send_json({"type":"pong"})
     except WebSocketDisconnect:
         pass
     finally:
+        room_left, user_left = None, None
         for r, conns in list(rooms.items()):
             if ws in conns:
-                conns.remove(ws)
+                user_left = conns.pop(ws)
+                room_left = r
                 if not conns:
                     rooms.pop(r, None)
                 break
+        
+        if room_left and user_left:
+            await broadcast(room_left, {"type": "system", "message": f"{user_left}님이 나갔습니다."})
+            await broadcast_participants(room_left)
 
 
 async def broadcast(room: str, payload: dict):
-    conns = rooms.get(room, set()).copy()
+    conns = rooms.get(room, {}).copy()
     for w in conns:
         try:
             await w.send_json(payload)
         except Exception:
             # 깨진 연결 제거
-            rooms[room].discard(w)
+            if room in rooms and w in rooms[room]:
+                del rooms[room][w]
 
 def safe_name(filename: str) -> str:
     # 확장자 보존 + UUID로 파일명 치환

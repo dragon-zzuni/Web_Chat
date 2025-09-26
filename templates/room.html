@@ -2,7 +2,7 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>{{ room }} 검색</title>
+    <title>{{ room }} 채팅방</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
       :root{ --bg:#fff; --text:#222; --muted:#666; --border:#e5e7eb; --chip:#f3f4f6; }
@@ -71,31 +71,15 @@
 
     <!-- 본문 -->
     <div class="layout">
-      <!-- 왼쪽: 구글 검색 패널 -->
-      <!-- 왼쪽: 검색 패널 -->
-    <aside class="left">
-        <form id="googleSearchForm" action="https://www.google.com/search" method="GET" target="_blank">
-        <input type="text" name="q" value="챗지피티"
-                style="width:100%; padding:8px 10px; border:1px solid var(--border); border-radius:8px;">
-        <button type="submit" style="margin-top:8px; width:100%; padding:8px 10px; border:1px solid var(--border); border-radius:8px; background:#fff; cursor:pointer;">
-            🔍 구글에서 검색
-        </button>
-        </form>
-    
-        <div style="margin-top:12px; border:1px solid var(--border); border-radius:8px; overflow:hidden;">
-        <!-- ⚠️ 구글 대신 DDG lite를 iframe 미리보기로 사용 -->
-        <iframe id="searchPreview"
-                src="https://www.google.com/search?q=챗지피티"
-                style="width:100%; height:360px; border:0;"></iframe>
-        </div>
-    
-        <!-- 미리보기 내에서 검색(iframe 갱신용) -->
-        <form id="previewSearch" style="margin-top:8px;">
-        <input id="previewQuery" type="text" placeholder="미리보기에서 검색…" value="챗지피티"
-                style="width:100%; padding:6px 8px; border:1px solid var(--border); border-radius:8px;">
-        </form>
-    </aside>
-  
+      <!-- 왼쪽: 참가자 목록 -->
+      <aside class="left">
+        <h2 style="font-size: 18px; font-weight: 500; margin: 0 0 12px;">
+          참가자 (<span id="p-count">0</span>)
+        </h2>
+        <ul id="participant-list" style="list-style: none; margin: 0; padding: 0; font-size: 14px; color: #333;">
+          <!-- 참가자 목록이 여기에 동적으로 추가됩니다. -->
+        </ul>
+      </aside>
 
       <!-- 오른쪽: 채팅 UI -->
       <main class="right">
@@ -116,14 +100,6 @@
 
     <script src="/static/client.js"></script>
     <script>
-      // 왼쪽 검색창 제출 시 미리보기 iframe도 갱신
-      document.getElementById('googleSearchForm').addEventListener('submit', function(e){
-        e.preventDefault();
-        const q = this.q.value.trim() || '챗지피티';
-        document.getElementById('googlePreview').src =
-          "https://www.google.com/search?q=" + encodeURIComponent(q);
-      });
-
       // 방 초기화 (기존 로직 유지)
       const room = "{{ room }}";
       const [_, nameHash, pwHash] = (location.hash || "#anon#").split('#');

@@ -3,6 +3,13 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# data files
+./uploads/*
+uploads/*
+
+# passwords
+./room_passwords.json
+
 # C extensions
 *.so
 
