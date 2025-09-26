@@ -37,6 +37,7 @@
       /* 파일 첨부 라인 */
       .attach{display:flex; align-items:center; gap:8px; margin-top:10px; font-size:13px;}
       .chip{display:inline-block; background:var(--chip); border:1px dashed var(--border); padding:6px 10px; border-radius:10px}
+      .crypto-status{margin-top:10px; font-size:12px; color:#5f6368;}
 
       /* 반응형: 화면 좁으면 왼쪽 패널 숨김 */
       @media (max-width: 1000px){
@@ -115,6 +116,8 @@
           <button id="sendFile">파일 전송</button>
           <span class="chip">허용: 모든 파일(내부 공유)</span>
         </div>
+
+        <div id="packetKeyStatus" class="crypto-status">키 미설정 - 로그인 화면 하단에서 공유된 코드를 저장하세요.</div>
       </main>
     </div>
 
@@ -136,7 +139,7 @@
             const now = getCurrentName();
             const next = prompt('새 닉네임을 입력하세요', now || '');
             if(next && next.trim() && next.trim() !== now){
-              setName(next.trim());
+              await setName(next.trim());
             }
           }
         }

@@ -16,3 +16,5 @@ typing-inspection
 typing_extensions
 uvicorn
 websockets
+cryptography
+python-dotenv

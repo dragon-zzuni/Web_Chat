@@ -34,6 +34,12 @@
 
       .admin{margin-top:16px; border-top:1px solid var(--border); padding-top:12px;}
       .admin input{width:100%; padding:10px; border:1px dashed var(--border); border-radius:8px;}
+      .crypto{margin-top:12px;}
+      .crypto-row{display:flex; gap:8px; margin-top:6px;}
+      .crypto-row input{flex:1; padding:10px; border:1px solid var(--border); border-radius:8px; font-size:14px;}
+      .crypto-row button{padding:10px 14px; border:1px solid var(--border); border-radius:8px; background:#fff; cursor:pointer; font-size:13px;}
+      .crypto-row button:hover{background:#f8f9fa;}
+      .crypto-status{margin-top:6px; font-size:12px; color:var(--muted);}
       .actions{display:flex; gap:8px; margin-top:8px; justify-content:flex-end;}
       .actions button{border:1px solid var(--border); background:#fff; padding:6px 10px; border-radius:8px; cursor:pointer}
       .actions button:hover{background:#f8f9fa;}
@@ -78,6 +84,14 @@
         <div class="admin">
           <div class="mini">관리 토큰(방 삭제 시 필요)</div>
           <input id="adminToken" placeholder="ADMIN_TOKEN">
+          <div class="crypto">
+            <div class="mini">패킷 복호화 코드 (공유된 비밀)</div>
+            <div class="crypto-row">
+              <input id="packetKey" type="password" placeholder="공유 코드를 입력하세요" autocomplete="off">
+              <button id="applyPacketKey">저장</button>
+            </div>
+            <div id="packetKeyStatus" class="crypto-status">키 미설정</div>
+          </div>
         </div>
       </div>
     </div>
@@ -145,7 +159,10 @@
         }
       
         // ✅ 반드시 호출되게: DOM 준비되면 호출
-        window.addEventListener('DOMContentLoaded', fetchRooms);
+        window.addEventListener('DOMContentLoaded', ()=>{
+          fetchRooms();
+          initPacketKeyControls();
+        });
 
         async function createRoom(){
             const r = document.getElementById('newRoom').value.trim();
@@ -183,10 +200,41 @@
 
         // 엔터키로 입장
         window.addEventListener('DOMContentLoaded', ()=>{
-            fetchRooms();
             const pw = document.getElementById('pw');
             if(pw){ pw.addEventListener('keydown', e => { if(e.key==='Enter') go(); }); }
         });
+
+        const KEY_STORAGE = 'chat_packet_key';
+
+        function initPacketKeyControls(){
+          const input = document.getElementById('packetKey');
+          const status = document.getElementById('packetKeyStatus');
+          const button = document.getElementById('applyPacketKey');
+          if(!input || !status || !button) return;
+
+          const updateStatus = (text, ok) => {
+            status.textContent = text;
+            status.style.color = ok ? '#1a73e8' : '#d93025';
+          };
+
+          const saved = localStorage.getItem(KEY_STORAGE) || '';
+          input.value = saved;
+          updateStatus(saved ? '키 저장됨 (서버 설정과 동일해야 합니다)' : '키 미설정', Boolean(saved));
+
+          const apply = () => {
+            const value = input.value.trim();
+            if(value){
+              localStorage.setItem(KEY_STORAGE, value);
+              updateStatus('키 저장됨 (서버 설정과 동일해야 합니다)', true);
+            }else{
+              localStorage.removeItem(KEY_STORAGE);
+              updateStatus('키 미설정', false);
+            }
+          };
+
+          button.addEventListener('click', apply);
+          input.addEventListener('keydown', e => { if(e.key === 'Enter') apply(); });
+        }
       </script>
       
   </body>

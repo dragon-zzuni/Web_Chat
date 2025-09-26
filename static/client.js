@@ -1,6 +1,75 @@
 // /static/client.js (full file)
 // Implements: chat, file upload, paste-to-send, async clipboard button, drag-and-drop.
 
+const subtle = window.crypto && window.crypto.subtle;
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
+const makeCryptoError = (code, message) => {
+  const err = new Error(message);
+  err.code = code;
+  return err;
+};
+
+const base64UrlEncode = (buffer) => {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+};
+
+const base64UrlDecode = (input) => {
+  const pad = input.length % 4 === 0 ? '' : '='.repeat(4 - (input.length % 4));
+  const base64 = (input + pad).replace(/-/g, '+').replace(/_/g, '/');
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+};
+
+async function deriveAesKey(passphrase) {
+  if (!subtle) {
+    throw makeCryptoError('UNSUPPORTED', 'WebCrypto not supported');
+  }
+  const material = await subtle.digest('SHA-256', textEncoder.encode(passphrase));
+  return subtle.importKey('raw', material, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+}
+
+async function encryptWithKey(key, payload) {
+  if (!subtle) {
+    throw makeCryptoError('UNSUPPORTED', 'WebCrypto not supported');
+  }
+  const iv = window.crypto.getRandomValues(new Uint8Array(12));
+  const encoded = textEncoder.encode(JSON.stringify(payload));
+  const cipher = await subtle.encrypt({ name: 'AES-GCM', iv }, key, encoded);
+  const combined = new Uint8Array(iv.byteLength + cipher.byteLength);
+  combined.set(iv, 0);
+  combined.set(new Uint8Array(cipher), iv.byteLength);
+  return base64UrlEncode(combined);
+}
+
+async function decryptWithKey(key, token) {
+  if (!subtle) {
+    throw makeCryptoError('UNSUPPORTED', 'WebCrypto not supported');
+  }
+  const raw = base64UrlDecode(token);
+  if (raw.length <= 12) {
+    throw makeCryptoError('DECRYPT_FAIL', 'cipher too short');
+  }
+  const iv = raw.slice(0, 12);
+  const cipher = raw.slice(12);
+  try {
+    const plain = await subtle.decrypt({ name: 'AES-GCM', iv }, key, cipher);
+    return JSON.parse(textDecoder.decode(plain));
+  } catch (err) {
+    throw makeCryptoError('DECRYPT_FAIL', 'unable to decrypt');
+  }
+}
+
 function initChat({room, name, password, hooks={}}) {
   let myName = name;
   let myColor = localStorage.getItem('chat_color') || '#1a73e8';
@@ -12,6 +81,14 @@ function initChat({room, name, password, hooks={}}) {
       localStorage.setItem('chat_color', myColor);
     };
   }
+
+  const storageKey = 'chat_packet_key';
+  let packetKey = localStorage.getItem(storageKey) || '';
+  let cryptoKey = null;
+  const encryptedQueue = [];
+  let keyNoticeShown = false;
+  let serverKeyHash = null;
+  let fingerprintCheckId = 0;
 
   let unread = 0;
   function setTitle(){ document.title = (unread>0?`(${unread}) `:'') + `${room} 채팅방`; }
@@ -27,19 +104,30 @@ function initChat({room, name, password, hooks={}}) {
   const fileInput = document.getElementById('file');
   const sendFileBtn = document.getElementById('sendFile');
   const pasteBtn = document.getElementById('pasteFromClipboard');
-  const dropOverlay = document.getElementById('dropOverlay');
+  const dropHintOverlay = document.getElementById('dropOverlay');
+  const keyInput = document.getElementById('packetKey');
+  const keyApplyBtn = document.getElementById('applyPacketKey');
+  const keyStatus = document.getElementById('packetKeyStatus');
 
   const btnLeave  = document.getElementById('btnLeave');
   const btnRename = document.getElementById('btnRename');
   if (btnLeave)  btnLeave.onclick  = () => hooks.leave && hooks.leave();
-  if (btnRename) btnRename.onclick = () => {
+  if (btnRename) btnRename.onclick = async () => {
+    const applyRename = async (candidate) => {
+      const trimmed = (candidate || '').trim();
+      if (!trimmed || trimmed === myName) return;
+      const ok = await sendSecure({type:'rename', new: trimmed});
+      if (ok) myName = trimmed;
+    };
+
+    if (hooks.rename) {
+      await hooks.rename(() => myName, applyRename);
+      return;
+    }
+
     const now = myName;
     const next = prompt('새 닉네임', now || '');
-    if (next && next.trim() && next.trim() !== now) {
-      const newName = next.trim();
-      ws.send(JSON.stringify({type:'rename', new:newName}));
-      myName = newName;
-    }
+    await applyRename(next);
   };
 
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -58,62 +146,263 @@ function initChat({room, name, password, hooks={}}) {
     if (window.Notification && Notification.permission === 'default') Notification.requestPermission();
   };
 
-  ws.onmessage = (ev) => {
+  ws.onmessage = async (ev) => {
+    let envelope;
     try {
-      const d = JSON.parse(ev.data);
-      if (d.type === 'error') {
-        alert('입장 실패: ' + d.message); location.href='/';
-      } else if (d.type === 'system') {
-        addLine(`<div class="sys">[알림] ${esc(d.message)}</div>`);
-        bumpUnread();
-      } else if (d.type === 'chat') {
-        const self = d.from === myName;
-        const color = d.color || '#1a73e8';
-        const label = `<b style="color:${esc(color)}">${esc(d.from)}</b>`;
-        addLine(`<div class="chatline ${self?'me':''}">${label}: <span class="bubble">${esc(d.message)}</span></div>`);
-        if (!self) bumpUnread();
-        if (!self && d.message.includes('@' + myName) && window.Notification && Notification.permission === 'granted') {
-          new Notification(`'${room}' 방에서 새 멘션`, { body: `${d.from}: ${d.message}` });
+      envelope = JSON.parse(ev.data);
+    } catch (e) {
+      return;
+    }
+
+    if (envelope.type === 'key_hint') {
+      serverKeyHash = (envelope.hash || '').toLowerCase() || null;
+      fingerprintCheckId++;
+      if (serverKeyHash && packetKey) verifyKeyFingerprint();
+      return;
+    }
+
+    if (envelope.type === 'error') {
+      handlePayload(envelope);
+      return;
+    }
+
+    if (envelope.type !== 'cipher') {
+      handlePayload(envelope);
+      return;
+    }
+
+    try {
+      const payload = await decryptPayload(envelope.payload);
+      handlePayload(payload);
+      keyNoticeShown = false;
+      await processQueue();
+    } catch (err) {
+      if (err.code === 'NO_KEY') {
+        encryptedQueue.push(envelope.payload);
+        if (!keyNoticeShown) {
+          addLine('<div class="sys">[암호화] 메시지를 보려면 로그인 화면 하단에서 공유된 코드를 저장하세요.</div>');
+          keyNoticeShown = true;
         }
-      } else if (d.type === 'file') {
-        const self = d.from === myName;
-        const color = d.color || '#1a73e8';
-        const label = `<b style="color:${esc(color)}">${esc(d.from)}</b>`;
-        const isImage = /\.(jpe?g|png|gif|webp|bmp|svg)$/i.test(d.filename || '');
-        let fileElement;
-        if (isImage) {
-          fileElement = `<a href="${esc(d.url)}" target="_blank" rel="noopener">
-                           <img src="${esc(d.url)}" alt="${esc(d.filename)}" style="max-width: 300px; max-height: 250px; border-radius: 8px; margin-top: 4px; display: block;">
-                         </a>`;
-        } else {
-          fileElement = `📎 <a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.filename || '파일')}</a>`;
-        }
-        addLine(`<div class="chatline ${self?'me':''}">${label}: ${fileElement}</div>`);
-        if (!self) bumpUnread();
-      } else if (d.type === 'participants') {
-        const pList = document.getElementById('participant-list');
-        const pCount = document.getElementById('p-count');
-        if (!pList || !pCount) return;
-        pCount.textContent = d.users.length;
-        pList.innerHTML = '';
-        d.users.forEach(user => {
-          const li = document.createElement('li');
-          li.style.margin = '4px 0';
-          if (user === myName) li.innerHTML = `<b>${esc(user)} (나)</b>`;
-          else li.textContent = esc(user);
-          pList.appendChild(li);
-        });
+      } else if (err.code === 'DECRYPT_FAIL') {
+        encryptedQueue.push(envelope.payload);
+        updateKeyStatus('복호화 실패 - 키를 확인하세요', false);
+      } else if (err.code === 'UNSUPPORTED') {
+        updateKeyStatus('브라우저가 WebCrypto를 지원하지 않습니다.', false);
+      } else {
+        console.error('decrypt error', err);
       }
-    } catch (e) {}
+    }
   };
+
+  function handlePayload(d) {
+    if (!d || !d.type) return;
+    if (d.type === 'key_hint') {
+      serverKeyHash = (d.hash || '').toLowerCase() || null;
+      fingerprintCheckId++;
+      if (serverKeyHash && packetKey) verifyKeyFingerprint();
+      return;
+    }
+    if (d.type === 'error') {
+      if ((d.message || '') === 'encryption error') {
+        updateKeyStatus('암호화 실패 - 서버와 공유한 코드를 확인하세요.', false);
+        alert('암호화 키가 서버 설정과 다릅니다. 로그인 화면에서 동일한 코드를 저장한 뒤 다시 접속하세요.');
+      } else {
+        alert('입장 실패: ' + (d.message || '오류'));
+      }
+      location.href = '/';
+      return;
+    }
+    if (d.type === 'system') {
+      addLine(`<div class="sys">[알림] ${esc(d.message || '')}</div>`);
+      bumpUnread();
+      return;
+    }
+    if (d.type === 'chat') {
+      const self = d.from === myName;
+      const color = d.color || '#1a73e8';
+      const label = `<b style="color:${esc(color)}">${esc(d.from)}</b>`;
+      addLine(`<div class="chatline ${self?'me':''}">${label}: <span class="bubble">${esc(d.message)}</span></div>`);
+      if (!self) bumpUnread();
+      if (!self && d.message && d.message.includes('@' + myName) && window.Notification && Notification.permission === 'granted') {
+        new Notification(`'${room}' 방에서 새 멘션`, { body: `${d.from}: ${d.message}` });
+      }
+      return;
+    }
+    if (d.type === 'file') {
+      const self = d.from === myName;
+      const color = d.color || '#1a73e8';
+      const label = `<b style="color:${esc(color)}">${esc(d.from)}</b>`;
+      const isImage = /\.(jpe?g|png|gif|webp|bmp|svg)$/i.test(d.filename || '');
+      let fileElement;
+      if (isImage) {
+        fileElement = `<a href="${esc(d.url)}" target="_blank" rel="noopener">
+                         <img src="${esc(d.url)}" alt="${esc(d.filename)}" style="max-width: 300px; max-height: 250px; border-radius: 8px; margin-top: 4px; display: block;">
+                       </a>`;
+      } else {
+        fileElement = `📎 <a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.filename || '파일')}</a>`;
+      }
+      addLine(`<div class="chatline ${self?'me':''}">${label}: ${fileElement}</div>`);
+      if (!self) bumpUnread();
+      return;
+    }
+    if (d.type === 'participants') {
+      const pList = document.getElementById('participant-list');
+      const pCount = document.getElementById('p-count');
+      if (!pList || !pCount) return;
+      pCount.textContent = d.users.length;
+      pList.innerHTML = '';
+      d.users.forEach(user => {
+        const li = document.createElement('li');
+        li.style.margin = '4px 0';
+        if (user === myName) li.innerHTML = `<b>${esc(user)} (나)</b>`;
+        else li.textContent = esc(user);
+        pList.appendChild(li);
+      });
+      return;
+    }
+    if (d.type === 'pong') {
+      return;
+    }
+  }
+
+  const defaultStatusMsg = '키 미설정 - 로그인 화면 하단에서 코드를 입력하세요.';
+
+  async function verifyKeyFingerprint() {
+    if (!subtle) return;
+    if (!serverKeyHash) return;
+    if (!packetKey) {
+      fingerprintCheckId++;
+      updateKeyStatus(defaultStatusMsg, false);
+      return;
+    }
+
+    const currentCheck = ++fingerprintCheckId;
+    try {
+      const digest = await subtle.digest('SHA-256', textEncoder.encode(packetKey));
+      if (currentCheck !== fingerprintCheckId) return;
+      const hex = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+      if (hex === serverKeyHash) {
+        updateKeyStatus('키 적용됨 (서버와 일치)', true);
+      } else {
+        updateKeyStatus('키 불일치 - 로그인 화면에서 서버와 동일한 코드를 저장하세요.', false);
+      }
+    } catch (err) {
+      console.error('verifyKeyFingerprint error', err);
+    }
+  }
+
+  function updateKeyStatus(text, ok = true) {
+    if (!keyStatus) return;
+    keyStatus.textContent = text;
+    keyStatus.style.color = ok ? '#1a73e8' : '#d93025';
+  }
+
+  function setPacketKey(value, persist = true) {
+    packetKey = (value || '').trim();
+    cryptoKey = null;
+    if (packetKey) {
+      if (persist) localStorage.setItem(storageKey, packetKey);
+      updateKeyStatus('키 적용됨 (로컬 저장)', true);
+      processQueue();
+      verifyKeyFingerprint();
+    } else {
+      if (persist) localStorage.removeItem(storageKey);
+      updateKeyStatus(defaultStatusMsg, false);
+      fingerprintCheckId++;
+    }
+  }
+
+  async function getCryptoKey() {
+    if (!packetKey) throw makeCryptoError('NO_KEY', 'packet key missing');
+    if (cryptoKey) return cryptoKey;
+    cryptoKey = await deriveAesKey(packetKey);
+    return cryptoKey;
+  }
+
+  async function encryptPayload(payload) {
+    const key = await getCryptoKey();
+    return encryptWithKey(key, payload);
+  }
+
+  async function decryptPayload(token) {
+    const key = await getCryptoKey();
+    return decryptWithKey(key, token);
+  }
+
+  async function processQueue() {
+    if (!packetKey || !encryptedQueue.length) return;
+    const pending = encryptedQueue.splice(0, encryptedQueue.length);
+    for (const token of pending) {
+      try {
+        const payload = await decryptPayload(token);
+        handlePayload(payload);
+        keyNoticeShown = false;
+      } catch (err) {
+        if (err.code === 'NO_KEY') {
+          encryptedQueue.push(token);
+          return;
+        }
+        if (err.code === 'DECRYPT_FAIL') {
+          encryptedQueue.unshift(token);
+          updateKeyStatus('복호화 실패 - 키를 확인하세요', false);
+          return;
+        }
+        if (err.code === 'UNSUPPORTED') {
+          updateKeyStatus('브라우저가 WebCrypto를 지원하지 않습니다.', false);
+          return;
+        }
+        console.error('processQueue error', err);
+        return;
+      }
+    }
+  }
+
+  async function sendSecure(payload) {
+    try {
+      const cipher = await encryptPayload(payload);
+      ws.send(JSON.stringify({type:'cipher', payload: cipher}));
+      return true;
+    } catch (err) {
+      if (err.code === 'NO_KEY') {
+        updateKeyStatus(defaultStatusMsg, false);
+        alert('암호화 키를 먼저 입력하세요. 로그인 화면 하단에서 코드를 저장하세요.');
+      } else if (err.code === 'UNSUPPORTED') {
+        updateKeyStatus('브라우저가 WebCrypto를 지원하지 않습니다.', false);
+        alert('이 브라우저에서는 암호화를 사용할 수 없습니다.');
+      } else {
+        updateKeyStatus('암호화 실패 - 키를 확인하세요', false);
+        alert('메시지를 암호화하지 못했습니다. 콘솔을 확인하세요.');
+      }
+      console.error('sendSecure error', err);
+      return false;
+    }
+  }
+
+  if (keyInput) {
+    keyInput.value = packetKey;
+    keyInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') setPacketKey(keyInput.value);
+    });
+  }
+  if (keyApplyBtn) keyApplyBtn.onclick = () => setPacketKey(keyInput ? keyInput.value : '');
+  if (packetKey) setPacketKey(packetKey, false); else updateKeyStatus(defaultStatusMsg, false);
+  window.addEventListener('storage', (event) => {
+    if (event.key === storageKey) {
+      setPacketKey(event.newValue || '', false);
+    }
+  });
+  if (!subtle) updateKeyStatus('브라우저가 WebCrypto를 지원하지 않습니다.', false);
 
   ws.onclose = () => addLine(`<div class="sys">[알림] 서버와 연결이 종료되었습니다.</div>`);
 
-  btn.onclick = () => {
+  btn.onclick = async () => {
     const text = msg.value.trim();
     if (!text) return;
-    ws.send(JSON.stringify({type:"chat", message:text, color: myColor}));
-    msg.value = ''; msg.focus();
+    const ok = await sendSecure({type:'chat', message:text, color: myColor});
+    if (ok) {
+      msg.value = '';
+      msg.focus();
+    }
   };
   msg.addEventListener('keydown', e => { if (e.key === 'Enter') btn.click(); });
 
@@ -250,13 +539,13 @@ function initChat({room, name, password, hooks={}}) {
 
   ['dragenter','dragover'].forEach(t => {
     document.addEventListener(t, (e) => {
-      if (isDragWithFiles(e)) { e.preventDefault(); dropOverlay.classList.add('active'); }
+      if (isDragWithFiles(e) && dropHintOverlay) { e.preventDefault(); dropHintOverlay.classList.add('active'); }
     });
   });
   ['dragleave','drop'].forEach(t => {
     document.addEventListener(t, (e) => {
       if (t === 'dragleave' && e.relatedTarget && document.documentElement.contains(e.relatedTarget)) return;
-      dropOverlay.classList.remove('active');
+      if (dropHintOverlay) dropHintOverlay.classList.remove('active');
     });
   });
 

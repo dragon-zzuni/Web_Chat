@@ -8,6 +8,9 @@ import json, os
 from fastapi import UploadFile, File, Form
 from uuid import uuid4
 from fastapi import Header
+import base64
+import hashlib
+import secrets
 
 # Database integration
 from database import (
@@ -15,8 +18,33 @@ from database import (
     add_room, get_room_password, get_all_rooms, delete_room_db, room_exists
 )
 
+from dotenv import load_dotenv
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+load_dotenv()
+
 PROTECTED_ROOMS = {"구글"} # These rooms cannot be deleted
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "del")
+PACKET_SECRET = os.environ.get("PACKET_SECRET", "changeme")
+
+_aes_key = hashlib.sha256(PACKET_SECRET.encode("utf-8")).digest()
+_aesgcm = AESGCM(_aes_key)
+PACKET_FINGERPRINT = hashlib.sha256(PACKET_SECRET.encode("utf-8")).hexdigest()
+
+
+def encrypt_payload(payload: Dict[str, Any]) -> str:
+    data = json.dumps(payload).encode("utf-8")
+    nonce = secrets.token_bytes(12)
+    cipher = _aesgcm.encrypt(nonce, data, associated_data=None)
+    token = base64.urlsafe_b64encode(nonce + cipher)
+    return token.decode("utf-8")
+
+
+def decrypt_payload(token: str) -> Dict[str, Any]:
+    raw = base64.urlsafe_b64decode(token.encode("utf-8"))
+    nonce, cipher = raw[:12], raw[12:]
+    data = _aesgcm.decrypt(nonce, cipher, associated_data=None)
+    return json.loads(data.decode("utf-8"))
 
 app = FastAPI()
 
@@ -100,6 +128,8 @@ async def websocket_endpoint(ws: WebSocket):
             await ws.send_json({"type": "error", "message": e.detail})
             await ws.close(code=4001); return
 
+        await ws.send_json({"type": "key_hint", "hash": PACKET_FINGERPRINT})
+
         # Send past logs to the newly joined user
         past_logs = get_past_logs(room)
         for log in past_logs:
@@ -114,23 +144,33 @@ async def websocket_endpoint(ws: WebSocket):
                     "filename": log["filename"],
                     "color": log["color"],
                 }
-            await ws.send_json(payload)
+            await send_cipher(ws, payload)
 
         rooms.setdefault(room, {})[ws] = username
         await broadcast(room, {"type": "system", "message": f"{username}님이 입장했습니다."})
         await broadcast_participants(room)
 
         while True:
-            data = await ws.receive_json()
-            t = data.get("type")
+            incoming = await ws.receive_json()
+            if incoming.get("type") != "cipher":
+                continue
 
-            if t == "chat":
-                msg = str(data.get("message") or "")
-                color = data.get("color") or color
+            try:
+                payload = decrypt_payload(incoming.get("payload", ""))
+            except Exception:
+                await ws.send_json({"type": "error", "message": "encryption error"})
+                await ws.close(code=4003)
+                return
+
+            msg_type = payload.get("type")
+
+            if msg_type == "chat":
+                msg = str(payload.get("message") or "")
+                color = payload.get("color") or color
                 await broadcast(room, {"type": "chat", "from": username, "message": msg, "color": color})
 
-            elif t == "rename":
-                new_name = (data.get("new") or "").strip()
+            elif msg_type == "rename":
+                new_name = (payload.get("new") or "").strip()
                 if new_name and new_name != username:
                     old = username
                     username = new_name
@@ -138,8 +178,8 @@ async def websocket_endpoint(ws: WebSocket):
                     await broadcast(room, {"type": "system", "message": f"{old} → {username} 닉네임 변경"})
                     await broadcast_participants(room)
 
-            elif t == "ping":
-                await ws.send_json({"type":"pong"})
+            elif msg_type == "ping":
+                await send_cipher(ws, {"type": "pong"})
     except WebSocketDisconnect:
         pass
     finally:
@@ -165,10 +205,15 @@ async def broadcast(room: str, payload: dict):
     conns = rooms.get(room, {}).copy()
     for w in conns:
         try:
-            await w.send_json(payload)
+            await send_cipher(w, payload)
         except Exception:
             if room in rooms and w in rooms[room]:
                 del rooms[room][w]
+
+async def send_cipher(ws: WebSocket, payload: Dict[str, Any]):
+    token = encrypt_payload(payload)
+    await ws.send_json({"type": "cipher", "payload": token})
+
 
 def safe_name(filename: str) -> str:
     # 확장자 보존 + UUID로 파일명 치환
