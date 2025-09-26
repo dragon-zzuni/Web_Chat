@@ -1,45 +1,38 @@
-# server.py
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Depends
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi import Body
-from typing import Dict, Set
+from typing import Dict, Any
 import json, os
 from fastapi import UploadFile, File, Form
 from uuid import uuid4
 from fastapi import Header
 
-DATA_FILE = "room_passwords.json"
-PROTECTED_ROOMS = set()
+# Database integration
+from database import (
+    init_db, log_message, get_past_logs,
+    add_room, get_room_password, get_all_rooms, delete_room_db, room_exists
+)
+
+PROTECTED_ROOMS = {"dev", "general"} # These rooms cannot be deleted
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "del")
 
 app = FastAPI()
+
+@app.on_event("startup")
+async def startup_event():
+    init_db()
+
 templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# 방 비밀번호 (원하면 파일로 분리 가능)
-ROOM_PASSWORDS: Dict[str, str] = {
-    "dev": "devpass123",
-    "general": "hello1234"
-}
-
-def load_rooms():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"dev":"devpass123", "general":"hello1234"}
-
-def save_rooms(rooms_dict):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(rooms_dict, f, ensure_ascii=False, indent=2)
-
-ROOM_PASSWORDS = load_rooms()
+# In-memory store for active websocket connections
 rooms: Dict[str, Dict[WebSocket, str]] = {}
 
 
 async def room_auth(room: str, password: str):
-    expected = ROOM_PASSWORDS.get(room)
+    expected = get_room_password(room)
     if expected is None:
         raise HTTPException(status_code=404, detail="room not found")
     if expected != password:
@@ -48,14 +41,10 @@ async def room_auth(room: str, password: str):
 os.makedirs("uploads", exist_ok=True)
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
-
 
 @app.get("/api/rooms")
 def list_rooms():
-    # 방 이름만 노출(비번은 숨김)
-    return {"rooms": sorted(list(ROOM_PASSWORDS.keys()))}
+    return {"rooms": sorted(get_all_rooms())}
 
 @app.post("/api/rooms")
 async def create_room(request: Request):
@@ -71,11 +60,10 @@ async def create_room(request: Request):
 
     if not name or not password:
         raise HTTPException(status_code=400, detail="name and password are required")
-    if name in ROOM_PASSWORDS:
+    if room_exists(name):
         raise HTTPException(status_code=409, detail="room already exists")
 
-    ROOM_PASSWORDS[name] = password
-    save_rooms(ROOM_PASSWORDS)
+    add_room(name, password)
     return {"ok": True, "room": name}
 
 @app.get("/", response_class=HTMLResponse)
@@ -104,13 +92,29 @@ async def websocket_endpoint(ws: WebSocket):
         room = join_msg.get("room") or ""
         username = join_msg.get("username") or "anon"
         password = join_msg.get("password") or ""
-        color = join_msg.get("color") or "#1a73e8"  # 닉네임 색 기본
+        color = join_msg.get("color") or "#1a73e8"
 
         try:
             await room_auth(room, password)
         except HTTPException as e:
             await ws.send_json({"type": "error", "message": e.detail})
             await ws.close(code=4001); return
+
+        # Send past logs to the newly joined user
+        past_logs = get_past_logs(room)
+        for log in past_logs:
+            if log['type'] == 'system':
+                payload = {"type": "system", "message": log["message"]}
+            else:
+                payload = {
+                    "type": log["type"],
+                    "from": log["username"],
+                    "message": log["message"],
+                    "url": log["url"],
+                    "filename": log["filename"],
+                    "color": log["color"],
+                }
+            await ws.send_json(payload)
 
         rooms.setdefault(room, {})[ws] = username
         await broadcast(room, {"type": "system", "message": f"{username}님이 입장했습니다."})
@@ -122,7 +126,6 @@ async def websocket_endpoint(ws: WebSocket):
 
             if t == "chat":
                 msg = str(data.get("message") or "")
-                # 클라이언트가 보낸 최신 색상 반영
                 color = data.get("color") or color
                 await broadcast(room, {"type": "chat", "from": username, "message": msg, "color": color})
 
@@ -155,12 +158,15 @@ async def websocket_endpoint(ws: WebSocket):
 
 
 async def broadcast(room: str, payload: dict):
+    # Log first, then broadcast
+    if payload.get("type") in ["chat", "file", "system"]:
+        log_message(room, payload)
+
     conns = rooms.get(room, {}).copy()
     for w in conns:
         try:
             await w.send_json(payload)
         except Exception:
-            # 깨진 연결 제거
             if room in rooms and w in rooms[room]:
                 del rooms[room][w]
 
@@ -174,7 +180,7 @@ def safe_name(filename: str) -> str:
 @app.post("/api/upload")
 async def upload_file(room: str = Form(...), username: str = Form(...), file: UploadFile = File(...)):
     # 방 존재 확인
-    if room not in ROOM_PASSWORDS:
+    if not room_exists(room):
         raise HTTPException(status_code=404, detail="room not found")
 
     # 저장 경로 준비
@@ -211,7 +217,7 @@ async def delete_room(name: str, x_admin_token: str = Header(None)):
         raise HTTPException(status_code=401, detail="invalid admin token")
 
     name = name.strip()
-    if name not in ROOM_PASSWORDS:
+    if not room_exists(name):
         raise HTTPException(status_code=404, detail="room not found")
     if name in PROTECTED_ROOMS:
         raise HTTPException(status_code=403, detail="protected room")
@@ -229,8 +235,7 @@ async def delete_room(name: str, x_admin_token: str = Header(None)):
                 pass
         rooms.pop(name, None)
 
-    # 2) 저장된 비밀번호/목록에서 제거
-    ROOM_PASSWORDS.pop(name, None)
-    save_rooms(ROOM_PASSWORDS)
+    # 2) DB에서 방 제거
+    delete_room_db(name)
 
     return {"ok": True, "deleted": name}
