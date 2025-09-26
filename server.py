@@ -11,6 +11,7 @@ from fastapi import Header
 import base64
 import hashlib
 import secrets
+from datetime import datetime, timezone
 
 # Database integration
 from database import (
@@ -144,6 +145,9 @@ async def websocket_endpoint(ws: WebSocket):
                     "filename": log["filename"],
                     "color": log["color"],
                 }
+            ts = log.get("timestamp")
+            if ts:
+                payload["timestamp"] = ts if "T" in ts else f"{ts.replace(' ', 'T')}Z"
             await send_cipher(ws, payload)
 
         rooms.setdefault(room, {})[ws] = username
@@ -199,6 +203,8 @@ async def websocket_endpoint(ws: WebSocket):
 
 async def broadcast(room: str, payload: dict):
     # Log first, then broadcast
+    if "timestamp" not in payload:
+        payload["timestamp"] = datetime.now(timezone.utc).isoformat(timespec='seconds')
     if payload.get("type") in ["chat", "file", "system"]:
         log_message(room, payload)
 

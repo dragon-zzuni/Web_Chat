@@ -140,6 +140,16 @@ function initChat({room, name, password, hooks={}}) {
     log.scrollTop = log.scrollHeight;
   }
   const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
+  function renderTimestamp(ts) {
+    if (!ts) return '';
+    const date = new Date(ts);
+    if (Number.isNaN(date.getTime())) return '';
+    const display = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const title = date.toLocaleString();
+    const iso = date.toISOString();
+    return '<time class="timestamp" datetime="' + iso + '" title="' + esc(title) + '">' + esc(display) + '</time>';
+  }
+
 
   ws.onopen = () => {
     ws.send(JSON.stringify({type:"join", room, username:myName, password, color: myColor}));
@@ -213,7 +223,8 @@ function initChat({room, name, password, hooks={}}) {
       return;
     }
     if (d.type === 'system') {
-      addLine(`<div class="sys">[알림] ${esc(d.message || '')}</div>`);
+      const stamp = renderTimestamp(d.timestamp);
+      addLine(`<div class="sys">${stamp}<span>[알림] ${esc(d.message || '')}</span></div>`);
       bumpUnread();
       return;
     }
@@ -221,7 +232,8 @@ function initChat({room, name, password, hooks={}}) {
       const self = d.from === myName;
       const color = d.color || '#1a73e8';
       const label = `<b style="color:${esc(color)}">${esc(d.from)}</b>`;
-      addLine(`<div class="chatline ${self?'me':''}">${label}: <span class="bubble">${esc(d.message)}</span></div>`);
+      const stamp = renderTimestamp(d.timestamp);
+      addLine(`<div class="chatline ${self?'me':''}">${stamp}${label}: <span class="bubble">${esc(d.message)}</span></div>`);
       if (!self) bumpUnread();
       if (!self && d.message && d.message.includes('@' + myName) && window.Notification && Notification.permission === 'granted') {
         new Notification(`'${room}' 방에서 새 멘션`, { body: `${d.from}: ${d.message}` });
@@ -232,6 +244,7 @@ function initChat({room, name, password, hooks={}}) {
       const self = d.from === myName;
       const color = d.color || '#1a73e8';
       const label = `<b style="color:${esc(color)}">${esc(d.from)}</b>`;
+      const stamp = renderTimestamp(d.timestamp);
       const isImage = /\.(jpe?g|png|gif|webp|bmp|svg)$/i.test(d.filename || '');
       let fileElement;
       if (isImage) {
@@ -241,7 +254,7 @@ function initChat({room, name, password, hooks={}}) {
       } else {
         fileElement = `📎 <a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.filename || '파일')}</a>`;
       }
-      addLine(`<div class="chatline ${self?'me':''}">${label}: ${fileElement}</div>`);
+      addLine(`<div class="chatline ${self?'me':''}">${stamp}${label}: ${fileElement}</div>`);
       if (!self) bumpUnread();
       return;
     }
