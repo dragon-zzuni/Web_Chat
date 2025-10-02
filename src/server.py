@@ -26,7 +26,7 @@ load_dotenv()
 
 PROTECTED_ROOMS = {"구글"} # These rooms cannot be deleted
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "del")
-APP_VERSION = "2.0.1"  # Increment this when you update static files
+APP_VERSION = "2.0.2"  # Increment this when you update static files
 
 app = FastAPI()
 

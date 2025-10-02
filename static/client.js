@@ -228,11 +228,11 @@ function initChat({room, name, password, hooks={}}) {
 
     const replyBox = document.createElement('div');
     replyBox.id = 'reply-box';
-    replyBox.style.cssText = 'display:none;background:#f8f9fa;border-left:3px solid #1a73e8;padding:8px;margin-top:10px;border-radius:4px;position:relative;';
+    replyBox.style.cssText = 'display:none;background:var(--chip);color:var(--text);border-left:3px solid #1a73e8;padding:8px;margin-top:10px;border-radius:4px;position:relative;';
     replyBox.innerHTML = `
-      <div style="font-size:12px;color:#666;margin-bottom:4px;">답장하기</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:4px;">답장하기</div>
       <div id="reply-preview" style="font-size:13px;"></div>
-      <button id="cancel-reply" style="position:absolute;top:4px;right:4px;border:none;background:transparent;cursor:pointer;font-size:18px;color:#666;">&times;</button>
+      <button id="cancel-reply" style="position:absolute;top:4px;right:4px;border:none;background:transparent;cursor:pointer;font-size:18px;color:var(--muted);">&times;</button>
     `;
     msg.parentElement.insertBefore(replyBox, msg.parentElement.firstChild);
     document.getElementById('cancel-reply').onclick = () => {
@@ -465,7 +465,7 @@ function initChat({room, name, password, hooks={}}) {
         if (replyMsg) {
           const replyText = replyMsg.getAttribute('data-msg-text') || '';
           const replyFrom = replyMsg.getAttribute('data-msg-from') || '';
-          replyHtml = `<div style="background:#e8eaed;border-left:3px solid #1a73e8;padding:4px 8px;margin-bottom:4px;font-size:12px;border-radius:4px;">
+          replyHtml = `<div style="background:var(--chip);color:var(--text);border-left:3px solid #1a73e8;padding:4px 8px;margin-bottom:4px;font-size:12px;border-radius:4px;">
             <b>${esc(replyFrom)}</b>: ${esc(replyText.substring(0, 50))}${replyText.length > 50 ? '...' : ''}
           </div>`;
         }
