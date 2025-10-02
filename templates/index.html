@@ -85,11 +85,11 @@
     <script>
         function renderRooms(rooms){
           const ul = document.getElementById('roomList');
-          if (!ul) return;            // DOM 아직이면 그냥 리턴
+          if (!ul) return;
           ul.innerHTML = '';
           rooms.forEach(name=>{
             const li = document.createElement('li');
-      
+
             // 방 이름 클릭 → 상단 폼에 자동 채움
             const a = document.createElement('a');
             a.href = '#';
@@ -101,7 +101,7 @@
               if (n) n.focus();
             };
             li.appendChild(a);
-      
+
             // 삭제 버튼
             const del = document.createElement('button');
             del.textContent = '삭제';
@@ -111,7 +111,7 @@
               const token = tokenEl ? tokenEl.value.trim() : '';
               if(!token){ alert('관리 토큰을 입력하세요.'); return; }
               if(!confirm(`정말 '${name}' 방을 삭제하시겠습니까?`)) return;
-      
+
               try{
                 const res = await fetch(`/api/rooms/${encodeURIComponent(name)}`, {
                   method: 'DELETE',
@@ -126,11 +126,11 @@
               }
             };
             li.appendChild(del);
-      
+
             ul.appendChild(li);
           });
         }
-      
+
         async function fetchRooms(){
           try{
             const res = await fetch('/api/rooms');
@@ -143,9 +143,11 @@
             console.error('fetchRooms error:', e);
           }
         }
-      
-        // ✅ 반드시 호출되게: DOM 준비되면 호출
-        window.addEventListener('DOMContentLoaded', fetchRooms);
+
+        // DOM 준비되면 호출
+        window.addEventListener('DOMContentLoaded', ()=>{
+          fetchRooms();
+        });
 
         async function createRoom(){
             const r = document.getElementById('newRoom').value.trim();
@@ -156,15 +158,15 @@
             const res = await fetch('/api/rooms', {
                 method:'POST',
                 headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({ name: r, password: p })   // 서버: POST /api/rooms
+                body: JSON.stringify({ name: r, password: p })
             });
             const body = await res.json().catch(()=>({}));
             if(!res.ok){ alert('생성 실패: ' + (body.detail || res.status)); return; }
 
             alert(`'${r}' 방이 생성되었습니다.`);
-            document.getElementById('room').value = r;         // 위쪽 입장 폼에 자동 채움
+            document.getElementById('room').value = r;
             document.getElementById('name').focus();
-            fetchRooms();                                      // 목록 갱신
+            fetchRooms();
             }catch(e){
             alert('에러: ' + e);
             }
@@ -183,11 +185,10 @@
 
         // 엔터키로 입장
         window.addEventListener('DOMContentLoaded', ()=>{
-            fetchRooms();
             const pw = document.getElementById('pw');
             if(pw){ pw.addEventListener('keydown', e => { if(e.key==='Enter') go(); }); }
         });
       </script>
-      
+
   </body>
 </html>

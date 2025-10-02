@@ -8,6 +8,7 @@ import json, os
 from fastapi import UploadFile, File, Form
 from uuid import uuid4
 from fastapi import Header
+from datetime import datetime, timezone
 
 # Database integration
 from database import (
@@ -15,7 +16,11 @@ from database import (
     add_room, get_room_password, get_all_rooms, delete_room_db, room_exists
 )
 
-PROTECTED_ROOMS = {"dev", "general"} # These rooms cannot be deleted
+from dotenv import load_dotenv
+
+load_dotenv()
+
+PROTECTED_ROOMS = {"구글"} # These rooms cannot be deleted
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "del")
 
 app = FastAPI()
@@ -114,6 +119,9 @@ async def websocket_endpoint(ws: WebSocket):
                     "filename": log["filename"],
                     "color": log["color"],
                 }
+            ts = log.get("timestamp")
+            if ts:
+                payload["timestamp"] = ts if "T" in ts else f"{ts.replace(' ', 'T')}Z"
             await ws.send_json(payload)
 
         rooms.setdefault(room, {})[ws] = username
@@ -121,16 +129,16 @@ async def websocket_endpoint(ws: WebSocket):
         await broadcast_participants(room)
 
         while True:
-            data = await ws.receive_json()
-            t = data.get("type")
+            payload = await ws.receive_json()
+            msg_type = payload.get("type")
 
-            if t == "chat":
-                msg = str(data.get("message") or "")
-                color = data.get("color") or color
+            if msg_type == "chat":
+                msg = str(payload.get("message") or "")
+                color = payload.get("color") or color
                 await broadcast(room, {"type": "chat", "from": username, "message": msg, "color": color})
 
-            elif t == "rename":
-                new_name = (data.get("new") or "").strip()
+            elif msg_type == "rename":
+                new_name = (payload.get("new") or "").strip()
                 if new_name and new_name != username:
                     old = username
                     username = new_name
@@ -138,8 +146,8 @@ async def websocket_endpoint(ws: WebSocket):
                     await broadcast(room, {"type": "system", "message": f"{old} → {username} 닉네임 변경"})
                     await broadcast_participants(room)
 
-            elif t == "ping":
-                await ws.send_json({"type":"pong"})
+            elif msg_type == "ping":
+                await ws.send_json({"type": "pong"})
     except WebSocketDisconnect:
         pass
     finally:
@@ -151,7 +159,7 @@ async def websocket_endpoint(ws: WebSocket):
                 if not conns:
                     rooms.pop(r, None)
                 break
-        
+
         if room_left and user_left:
             await broadcast(room_left, {"type": "system", "message": f"{user_left}님이 나갔습니다."})
             await broadcast_participants(room_left)
@@ -159,6 +167,8 @@ async def websocket_endpoint(ws: WebSocket):
 
 async def broadcast(room: str, payload: dict):
     # Log first, then broadcast
+    if "timestamp" not in payload:
+        payload["timestamp"] = datetime.now(timezone.utc).isoformat(timespec='seconds')
     if payload.get("type") in ["chat", "file", "system"]:
         log_message(room, payload)
 
@@ -169,6 +179,7 @@ async def broadcast(room: str, payload: dict):
         except Exception:
             if room in rooms and w in rooms[room]:
                 del rooms[room][w]
+
 
 def safe_name(filename: str) -> str:
     # 확장자 보존 + UUID로 파일명 치환
