@@ -22,9 +22,22 @@ def init_db():
         type TEXT NOT NULL DEFAULT 'chat',
         url TEXT,
         filename TEXT,
-        color TEXT
+        color TEXT,
+        reply_to_id INTEGER,
+        reactions TEXT DEFAULT '{}'
     )
     """)
+
+    # 기존 테이블에 새 컬럼 추가 (마이그레이션)
+    try:
+        cursor.execute("ALTER TABLE chat_logs ADD COLUMN reply_to_id INTEGER")
+    except sqlite3.OperationalError:
+        pass  # 컬럼이 이미 존재
+
+    try:
+        cursor.execute("ALTER TABLE chat_logs ADD COLUMN reactions TEXT DEFAULT '{}'")
+    except sqlite3.OperationalError:
+        pass  # 컬럼이 이미 존재
 
     # rooms 테이블 생성
     cursor.execute("""
@@ -51,10 +64,10 @@ def log_message(room: str, payload: Dict[str, Any]):
 
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    
+
     cursor.execute("""
-    INSERT INTO chat_logs (room, username, message, type, url, filename, color)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO chat_logs (room, username, message, type, url, filename, color, reply_to_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         room,
         payload.get("from", "system"),
@@ -62,10 +75,14 @@ def log_message(room: str, payload: Dict[str, Any]):
         msg_type,
         payload.get("url"),
         payload.get("filename"),
-        payload.get("color")
+        payload.get("color"),
+        payload.get("reply_to_id")
     ))
+
+    msg_id = cursor.lastrowid
     conn.commit()
     conn.close()
+    return msg_id
 
 def get_past_logs(room: str, limit: int = 50) -> List[Dict[str, Any]]:
     """특정 방의 과거 채팅 기록을 가져옵니다."""
@@ -128,3 +145,65 @@ def room_exists(name: str) -> bool:
     result = cursor.fetchone()
     conn.close()
     return result is not None
+
+# --- Reaction Functions ---
+
+def add_reaction(msg_id: int, emoji: str, username: str):
+    """메시지에 리액션을 추가합니다."""
+    import json
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT reactions FROM chat_logs WHERE id = ?", (msg_id,))
+    result = cursor.fetchone()
+    if not result:
+        conn.close()
+        return
+
+    reactions = json.loads(result[0] or "{}")
+    if emoji not in reactions:
+        reactions[emoji] = []
+    if username not in reactions[emoji]:
+        reactions[emoji].append(username)
+
+    cursor.execute("UPDATE chat_logs SET reactions = ? WHERE id = ?",
+                   (json.dumps(reactions), msg_id))
+    conn.commit()
+    conn.close()
+    return reactions
+
+def remove_reaction(msg_id: int, emoji: str, username: str):
+    """메시지에서 리액션을 제거합니다."""
+    import json
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT reactions FROM chat_logs WHERE id = ?", (msg_id,))
+    result = cursor.fetchone()
+    if not result:
+        conn.close()
+        return
+
+    reactions = json.loads(result[0] or "{}")
+    if emoji in reactions and username in reactions[emoji]:
+        reactions[emoji].remove(username)
+        if not reactions[emoji]:
+            del reactions[emoji]
+
+    cursor.execute("UPDATE chat_logs SET reactions = ? WHERE id = ?",
+                   (json.dumps(reactions), msg_id))
+    conn.commit()
+    conn.close()
+    return reactions
+
+def get_message_by_id(msg_id: int) -> Dict[str, Any] | None:
+    """메시지 ID로 메시지를 조회합니다."""
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT * FROM chat_logs WHERE id = ?", (msg_id,))
+    result = cursor.fetchone()
+    conn.close()
+
+    return dict(result) if result else None

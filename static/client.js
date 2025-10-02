@@ -4,6 +4,10 @@
 function initChat({room, name, password, hooks={}}) {
   let myName = name;
   let myColor = localStorage.getItem('chat_color') || '#1a73e8';
+  let replyingTo = null; // {id, from, message} for reply feature
+  let typingTimer = null;
+  let typingUsers = new Set(); // Track who's typing
+
   const colorPicker = document.getElementById('nameColor');
   if (colorPicker) {
     colorPicker.value = myColor;
@@ -28,6 +32,8 @@ function initChat({room, name, password, hooks={}}) {
   const sendFileBtn = document.getElementById('sendFile');
   const pasteBtn = document.getElementById('pasteFromClipboard');
   const dropOverlay = document.getElementById('drop-overlay');
+  const searchInput = document.getElementById('searchInput');
+  const clearSearch = document.getElementById('clearSearch');
 
   const btnLeave  = document.getElementById('btnLeave');
   const btnRename = document.getElementById('btnRename');
@@ -51,7 +57,44 @@ function initChat({room, name, password, hooks={}}) {
   };
 
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+  let ws = null;
+  let reconnectAttempts = 0;
+  let reconnectTimer = null;
+  let isIntentionallyClosed = false;
+
+  // Create connection status indicator
+  let statusIndicator = document.getElementById('connection-status');
+  if (!statusIndicator) {
+    statusIndicator = document.createElement('div');
+    statusIndicator.id = 'connection-status';
+    statusIndicator.style.cssText = `
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      padding: 8px 16px;
+      border-radius: 20px;
+      background: #4caf50;
+      color: white;
+      font-size: 12px;
+      display: none;
+      z-index: 1000;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+      transition: all 0.3s;
+    `;
+    document.body.appendChild(statusIndicator);
+  }
+
+  function showStatus(message, type = 'success') {
+    statusIndicator.textContent = message;
+    statusIndicator.style.display = 'block';
+    statusIndicator.style.background = type === 'success' ? '#4caf50' : type === 'error' ? '#f44336' : '#ff9800';
+
+    if (type === 'success') {
+      setTimeout(() => {
+        statusIndicator.style.display = 'none';
+      }, 3000);
+    }
+  }
 
   function addLine(html){
     const div = document.createElement('div');
@@ -70,20 +113,245 @@ function initChat({room, name, password, hooks={}}) {
     return '<time class="timestamp" datetime="' + iso + '" title="' + esc(title) + '">' + esc(display) + '</time>';
   }
 
-  ws.onopen = () => {
-    ws.send(JSON.stringify({type:"join", room, username:myName, password, color: myColor}));
-    if (window.Notification && Notification.permission === 'default') Notification.requestPermission();
+  // HTTP-compatible notification: play sound
+  function playNotificationSound() {
+    try {
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const oscillator = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
+      oscillator.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+      oscillator.frequency.value = 800;
+      oscillator.type = 'sine';
+      gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+      oscillator.start(audioContext.currentTime);
+      oscillator.stop(audioContext.currentTime + 0.5);
+    } catch (e) {
+      console.log('Could not play sound:', e);
+    }
+  }
+
+  // Flash title for mentions
+  let flashInterval = null;
+  function flashTitle(text) {
+    if (flashInterval) return; // Already flashing
+    const originalTitle = document.title;
+    let isOriginal = true;
+    let count = 0;
+    flashInterval = setInterval(() => {
+      document.title = isOriginal ? text : originalTitle;
+      isOriginal = !isOriginal;
+      count++;
+      if (count >= 6) {
+        clearInterval(flashInterval);
+        flashInterval = null;
+        document.title = originalTitle;
+      }
+    }, 500);
+  }
+
+  // Highlight @mentions in text
+  function highlightMentions(text) {
+    return text.replace(/@(\w+)/g, '<span style="background:#fff3cd;padding:2px 4px;border-radius:3px;font-weight:bold">@$1</span>');
+  }
+
+  // Render reactions
+  function renderReactions(reactions, msgId) {
+    if (!reactions || Object.keys(reactions).length === 0) return '';
+    let html = '<div class="reactions" style="margin-top:6px;display:flex;gap:4px;flex-wrap:wrap;">';
+    for (const [emoji, users] of Object.entries(reactions)) {
+      const count = users.length;
+      const title = users.join(', ');
+      html += `<button class="reaction-btn" onclick="window.toggleReaction(${msgId}, '${emoji}')"
+                style="border:1px solid #e0e0e0;background:#f0f0f0;border-radius:14px;padding:3px 10px;cursor:pointer;font-size:13px;font-weight:500;transition:all 0.2s;"
+                title="${esc(title)}"
+                onmouseover="this.style.background='#e5e5e5';this.style.transform='scale(1.05)'"
+                onmouseout="this.style.background='#f0f0f0';this.style.transform='scale(1)'">${emoji} ${count}</button>`;
+    }
+    html += '</div>';
+    return html;
+  }
+
+  // Setup reply UI
+  function setupReplyUI() {
+    const existingReplyBox = document.getElementById('reply-box');
+    if (existingReplyBox) return existingReplyBox;
+
+    const replyBox = document.createElement('div');
+    replyBox.id = 'reply-box';
+    replyBox.style.cssText = 'display:none;background:#f8f9fa;border-left:3px solid #1a73e8;padding:8px;margin-top:10px;border-radius:4px;position:relative;';
+    replyBox.innerHTML = `
+      <div style="font-size:12px;color:#666;margin-bottom:4px;">답장하기</div>
+      <div id="reply-preview" style="font-size:13px;"></div>
+      <button id="cancel-reply" style="position:absolute;top:4px;right:4px;border:none;background:transparent;cursor:pointer;font-size:18px;color:#666;">&times;</button>
+    `;
+    msg.parentElement.insertBefore(replyBox, msg.parentElement.firstChild);
+    document.getElementById('cancel-reply').onclick = () => {
+      replyingTo = null;
+      replyBox.style.display = 'none';
+    };
+    return replyBox;
+  }
+
+  const replyBox = setupReplyUI();
+
+  // Global function for toggling reactions (called from onclick in HTML)
+  window.toggleReaction = (msgId, emoji) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    // Check if current user already reacted with this emoji
+    // We'll send 'add' by default, server will handle toggle logic
+    ws.send(JSON.stringify({type: 'reaction', msg_id: msgId, emoji, action: 'add'}));
   };
 
-  ws.onmessage = async (ev) => {
-    let payload;
-    try {
-      payload = JSON.parse(ev.data);
-    } catch (e) {
+  // Global function for setting reply target
+  window.setReplyTo = (msgId, from, message) => {
+    replyingTo = {id: msgId, from, message};
+    replyBox.style.display = 'block';
+    document.getElementById('reply-preview').innerHTML = `<b>${esc(from)}</b>: ${esc(message.substring(0, 100))}${message.length > 100 ? '...' : ''}`;
+    msg.focus();
+  };
+
+  // Create custom context menu
+  let contextMenu = document.getElementById('custom-context-menu');
+  if (!contextMenu) {
+    contextMenu = document.createElement('div');
+    contextMenu.id = 'custom-context-menu';
+    contextMenu.style.cssText = `
+      position: fixed;
+      background: white;
+      border: 1px solid #dadce0;
+      border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+      padding: 4px 0;
+      display: none;
+      z-index: 10000;
+      min-width: 180px;
+    `;
+    document.body.appendChild(contextMenu);
+  }
+
+  // Show context menu
+  function showContextMenu(e, msgId, from, message) {
+    e.preventDefault();
+
+    contextMenu.innerHTML = `
+      <div style="padding: 8px 12px; font-size: 12px; color: #666; border-bottom: 1px solid #f0f0f0; font-weight: 500;">메시지 작업</div>
+      <button class="ctx-item" data-action="reply" style="width:100%;text-align:left;border:none;background:transparent;padding:8px 16px;cursor:pointer;font-size:14px;display:flex;align-items:center;gap:8px;">
+        <span>↩️</span><span>답장하기</span>
+      </button>
+      <div style="border-top: 1px solid #f0f0f0; margin: 4px 0;"></div>
+      <div style="padding: 4px 12px; font-size: 11px; color: #999;">빠른 반응</div>
+      <button class="ctx-item" data-action="react" data-emoji="👍" style="width:100%;text-align:left;border:none;background:transparent;padding:6px 16px;cursor:pointer;font-size:13px;display:flex;align-items:center;gap:8px;">
+        <span style="font-size:16px;">👍</span><span>좋아요</span>
+      </button>
+      <button class="ctx-item" data-action="react" data-emoji="❤️" style="width:100%;text-align:left;border:none;background:transparent;padding:6px 16px;cursor:pointer;font-size:13px;display:flex;align-items:center;gap:8px;">
+        <span style="font-size:16px;">❤️</span><span>하트</span>
+      </button>
+      <button class="ctx-item" data-action="react" data-emoji="😂" style="width:100%;text-align:left;border:none;background:transparent;padding:6px 16px;cursor:pointer;font-size:13px;display:flex;align-items:center;gap:8px;">
+        <span style="font-size:16px;">😂</span><span>웃음</span>
+      </button>
+      <button class="ctx-item" data-action="react" data-emoji="🎉" style="width:100%;text-align:left;border:none;background:transparent;padding:6px 16px;cursor:pointer;font-size:13px;display:flex;align-items:center;gap:8px;">
+        <span style="font-size:16px;">🎉</span><span>축하</span>
+      </button>
+    `;
+
+    // Position menu at cursor
+    contextMenu.style.left = e.pageX + 'px';
+    contextMenu.style.top = e.pageY + 'px';
+    contextMenu.style.display = 'block';
+
+    // Add hover effects
+    const items = contextMenu.querySelectorAll('.ctx-item');
+    items.forEach(item => {
+      item.onmouseover = () => item.style.background = '#f8f9fa';
+      item.onmouseout = () => item.style.background = 'transparent';
+
+      item.onclick = () => {
+        const action = item.getAttribute('data-action');
+        if (action === 'reply') {
+          window.setReplyTo(msgId, from, message);
+        } else if (action === 'react') {
+          const emoji = item.getAttribute('data-emoji');
+          window.toggleReaction(msgId, emoji);
+        }
+        contextMenu.style.display = 'none';
+      };
+    });
+  }
+
+  // Hide context menu on click anywhere
+  document.addEventListener('click', () => {
+    if (contextMenu) contextMenu.style.display = 'none';
+  });
+
+  // Global function to show context menu
+  window.showMessageMenu = showContextMenu;
+
+  // Show typing indicator
+  function updateTypingIndicator() {
+    let indicator = document.getElementById('typing-indicator');
+    if (!indicator) {
+      indicator = document.createElement('div');
+      indicator.id = 'typing-indicator';
+      indicator.style.cssText = 'font-size:12px;color:#666;font-style:italic;margin:8px 0;height:18px;';
+      log.parentElement.insertBefore(indicator, log.nextSibling);
+    }
+    if (typingUsers.size > 0) {
+      const names = Array.from(typingUsers).join(', ');
+      indicator.textContent = `${names}님이 입력 중...`;
+    } else {
+      indicator.textContent = '';
+    }
+  }
+
+  function connectWebSocket() {
+    if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
       return;
     }
-    handlePayload(payload);
-  };
+
+    ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+    ws.onopen = () => {
+      reconnectAttempts = 0;
+      showStatus('✅ 연결됨', 'success');
+      ws.send(JSON.stringify({type:"join", room, username:myName, password, color: myColor}));
+      if (window.Notification && Notification.permission === 'default') Notification.requestPermission();
+    };
+
+    ws.onmessage = async (ev) => {
+      let payload;
+      try {
+        payload = JSON.parse(ev.data);
+      } catch (e) {
+        return;
+      }
+      handlePayload(payload);
+    };
+
+    ws.onclose = (event) => {
+      if (!isIntentionallyClosed) {
+        addLine(`<div class="sys">[알림] 연결이 끊어졌습니다. 재연결 시도 중...</div>`);
+
+        // Exponential backoff: 1s, 2s, 4s, 8s, max 30s
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+        reconnectAttempts++;
+
+        showStatus(`🔄 재연결 중... (${reconnectAttempts}번째 시도)`, 'warning');
+
+        reconnectTimer = setTimeout(() => {
+          connectWebSocket();
+        }, delay);
+      }
+    };
+
+    ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+    };
+  }
+
+  // Initial connection
+  connectWebSocket();
 
   function handlePayload(d) {
     if (!d || !d.type) return;
@@ -98,15 +366,73 @@ function initChat({room, name, password, hooks={}}) {
       bumpUnread();
       return;
     }
+    if (d.type === 'typing') {
+      if (d.from && d.from !== myName) {
+        typingUsers.add(d.from);
+        updateTypingIndicator();
+        // Clear typing after 3 seconds
+        setTimeout(() => {
+          typingUsers.delete(d.from);
+          updateTypingIndicator();
+        }, 3000);
+      }
+      return;
+    }
+    if (d.type === 'reaction_update') {
+      // Update existing message reactions
+      const msgElement = document.querySelector(`[data-msg-id="${d.msg_id}"]`);
+      if (msgElement) {
+        const existingReactions = msgElement.querySelector('.reactions');
+        if (existingReactions) existingReactions.remove();
+        const reactionsHtml = renderReactions(d.reactions, d.msg_id);
+        if (reactionsHtml) {
+          msgElement.insertAdjacentHTML('beforeend', reactionsHtml);
+        }
+      }
+      return;
+    }
     if (d.type === 'chat') {
       const self = d.from === myName;
       const color = d.color || '#1a73e8';
       const label = `<b style="color:${esc(color)}">${esc(d.from)}</b>`;
       const stamp = renderTimestamp(d.timestamp);
-      addLine(`<div class="chatline ${self?'me':''}">${stamp}${label}: <span class="bubble">${esc(d.message)}</span></div>`);
+
+      // Reply context
+      let replyHtml = '';
+      if (d.reply_to_id) {
+        const replyMsg = document.querySelector(`[data-msg-id="${d.reply_to_id}"]`);
+        if (replyMsg) {
+          const replyText = replyMsg.getAttribute('data-msg-text') || '';
+          const replyFrom = replyMsg.getAttribute('data-msg-from') || '';
+          replyHtml = `<div style="background:#e8eaed;border-left:3px solid #1a73e8;padding:4px 8px;margin-bottom:4px;font-size:12px;border-radius:4px;">
+            <b>${esc(replyFrom)}</b>: ${esc(replyText.substring(0, 50))}${replyText.length > 50 ? '...' : ''}
+          </div>`;
+        }
+      }
+
+      // Message with @mentions highlighted
+      const messageHtml = highlightMentions(esc(d.message));
+
+      const reactionsHtml = d.reactions ? renderReactions(d.reactions, d.id) : '';
+
+      // Escape message for context menu
+      const escapedMsg = d.message.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+
+      addLine(`<div class="chatline ${self?'me':''}" data-msg-id="${d.id || ''}" data-msg-from="${esc(d.from)}" data-msg-text="${esc(d.message)}" style="margin-bottom:8px;display:block;padding:6px;border-radius:8px;transition:background 0.15s;" oncontextmenu="window.showMessageMenu(event, ${d.id}, '${esc(d.from)}', '${escapedMsg}'); return false;" onmouseover="this.style.background='#f8f9fa'" onmouseout="this.style.background='transparent'">
+        <div style="display:flex;align-items:flex-end;gap:6px;">${stamp}${label}: <span class="bubble">${replyHtml}${messageHtml}</span></div>
+        ${reactionsHtml}
+      </div>`);
+
       if (!self) bumpUnread();
-      if (!self && d.message && d.message.includes('@' + myName) && window.Notification && Notification.permission === 'granted') {
-        new Notification(`'${room}' 방에서 새 멘션`, { body: `${d.from}: ${d.message}` });
+
+      // HTTP-compatible @mention notification
+      if (!self && d.message && d.message.includes('@' + myName)) {
+        playNotificationSound();
+        flashTitle(`💬 ${d.from}님이 멘션`);
+        // Try browser notification if available
+        if (window.Notification && Notification.permission === 'granted') {
+          new Notification(`'${room}' 방에서 새 멘션`, { body: `${d.from}: ${d.message}` });
+        }
       }
       return;
     }
@@ -153,11 +479,29 @@ function initChat({room, name, password, hooks={}}) {
   btn.onclick = async () => {
     const text = msg.value.trim();
     if (!text) return;
-    ws.send(JSON.stringify({type:'chat', message:text, color: myColor}));
+    const payload = {type:'chat', message:text, color: myColor};
+    if (replyingTo) {
+      payload.reply_to_id = replyingTo.id;
+    }
+    ws.send(JSON.stringify(payload));
     msg.value = '';
+    // Clear reply state
+    replyingTo = null;
+    replyBox.style.display = 'none';
     msg.focus();
   };
   msg.addEventListener('keydown', e => { if (e.key === 'Enter') btn.click(); });
+
+  // Send typing indicator
+  msg.addEventListener('input', () => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    // Debounce typing event
+    if (typingTimer) clearTimeout(typingTimer);
+    ws.send(JSON.stringify({type: 'typing'}));
+    typingTimer = setTimeout(() => {
+      typingTimer = null;
+    }, 1000);
+  });
 
   // --- File upload primitive ---
   const MAX_IMAGE_BYTES = 25 * 1024 * 1024; // safety cap
@@ -271,6 +615,58 @@ function initChat({room, name, password, hooks={}}) {
       alert('클립보드 읽기가 차단되었거나 실패했습니다.');
     }
   });
+
+  // --- Message Search ---
+  if (searchInput && clearSearch) {
+    searchInput.addEventListener('input', () => {
+      const query = searchInput.value.trim().toLowerCase();
+      const messages = log.querySelectorAll('.chatline, .sys');
+
+      if (query) {
+        clearSearch.style.display = 'block';
+        let matchCount = 0;
+
+        messages.forEach(msgEl => {
+          const text = msgEl.textContent.toLowerCase();
+          if (text.includes(query)) {
+            msgEl.style.display = '';
+            msgEl.style.background = '#fff3cd'; // Highlight matches
+            matchCount++;
+          } else {
+            msgEl.style.display = 'none';
+          }
+        });
+
+        // Show match count
+        if (matchCount === 0) {
+          searchInput.style.borderColor = '#f44336';
+        } else {
+          searchInput.style.borderColor = '#4caf50';
+        }
+      } else {
+        clearSearch.style.display = 'none';
+        searchInput.style.borderColor = '';
+        messages.forEach(msgEl => {
+          msgEl.style.display = '';
+          msgEl.style.background = '';
+        });
+      }
+    });
+
+    clearSearch.onclick = () => {
+      searchInput.value = '';
+      searchInput.dispatchEvent(new Event('input'));
+      searchInput.focus();
+    };
+
+    // Ctrl+K to focus search
+    document.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+        e.preventDefault();
+        searchInput.focus();
+      }
+    });
+  }
 
   // --- Drag and drop to log area ---
   function isDragWithFiles(evt){ return evt.dataTransfer && Array.from(evt.dataTransfer.types||[]).includes('Files'); }

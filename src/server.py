@@ -1,5 +1,5 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Depends
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi import Body
@@ -9,11 +9,14 @@ from fastapi import UploadFile, File, Form
 from uuid import uuid4
 from fastapi import Header
 from datetime import datetime, timezone
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response as StarletteResponse
 
 # Database integration
-from database import (
+from .database import (
     init_db, log_message, get_past_logs,
-    add_room, get_room_password, get_all_rooms, delete_room_db, room_exists
+    add_room, get_room_password, get_all_rooms, delete_room_db, room_exists,
+    add_reaction, remove_reaction, get_message_by_id
 )
 
 from dotenv import load_dotenv
@@ -22,15 +25,46 @@ load_dotenv()
 
 PROTECTED_ROOMS = {"구글"} # These rooms cannot be deleted
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "del")
+APP_VERSION = "2.0.1"  # Increment this when you update static files
 
 app = FastAPI()
+
+# Custom StaticFiles with cache control
+class CachedStaticFiles(StaticFiles):
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            async def send_wrapper(message):
+                if message["type"] == "http.response.start":
+                    headers = dict(message.get("headers", []))
+                    # Add cache control header for static files
+                    headers[b"cache-control"] = b"public, max-age=3600"
+                    message["headers"] = [(k, v) for k, v in headers.items()]
+                await send(message)
+            await super().__call__(scope, receive, send_wrapper)
+        else:
+            await super().__call__(scope, receive, send)
+
+# Add cache control middleware for HTML
+class HTMLCacheControlMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+
+        # No cache for HTML pages
+        if request.url.path in ['/', '/room'] or request.url.path.endswith('.html'):
+            response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+            response.headers['Pragma'] = 'no-cache'
+            response.headers['Expires'] = '0'
+
+        return response
+
+app.add_middleware(HTMLCacheControlMiddleware)
 
 @app.on_event("startup")
 async def startup_event():
     init_db()
 
 templates = Jinja2Templates(directory="templates")
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", CachedStaticFiles(directory="static"), name="static")
 
 # In-memory store for active websocket connections
 rooms: Dict[str, Dict[WebSocket, str]] = {}
@@ -73,12 +107,19 @@ async def create_room(request: Request):
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse("index.html", {
+        "request": request,
+        "version": APP_VERSION
+    })
 
 @app.get("/room", response_class=HTMLResponse)
 def room_page(request: Request, room: str):
     # 방 존재 체크를 프론트에서 막지 말고, WS에서 비번 검증으로 처리
-    return templates.TemplateResponse("room.html", {"request": request, "room": room})
+    return templates.TemplateResponse("room.html", {
+        "request": request,
+        "room": room,
+        "version": APP_VERSION
+    })
 
 async def broadcast_participants(room: str):
     if room in rooms:
@@ -119,6 +160,16 @@ async def websocket_endpoint(ws: WebSocket):
                     "filename": log["filename"],
                     "color": log["color"],
                 }
+
+            # Add new fields
+            if log.get("id"):
+                payload["id"] = log["id"]
+            if log.get("reply_to_id"):
+                payload["reply_to_id"] = log["reply_to_id"]
+            if log.get("reactions"):
+                import json
+                payload["reactions"] = json.loads(log["reactions"]) if isinstance(log["reactions"], str) else log["reactions"]
+
             ts = log.get("timestamp")
             if ts:
                 payload["timestamp"] = ts if "T" in ts else f"{ts.replace(' ', 'T')}Z"
@@ -135,7 +186,14 @@ async def websocket_endpoint(ws: WebSocket):
             if msg_type == "chat":
                 msg = str(payload.get("message") or "")
                 color = payload.get("color") or color
-                await broadcast(room, {"type": "chat", "from": username, "message": msg, "color": color})
+                reply_to_id = payload.get("reply_to_id")
+                await broadcast(room, {
+                    "type": "chat",
+                    "from": username,
+                    "message": msg,
+                    "color": color,
+                    "reply_to_id": reply_to_id
+                })
 
             elif msg_type == "rename":
                 new_name = (payload.get("new") or "").strip()
@@ -145,6 +203,28 @@ async def websocket_endpoint(ws: WebSocket):
                     rooms[room][ws] = new_name
                     await broadcast(room, {"type": "system", "message": f"{old} → {username} 닉네임 변경"})
                     await broadcast_participants(room)
+
+            elif msg_type == "typing":
+                # Broadcast typing indicator without logging
+                await broadcast(room, {"type": "typing", "from": username})
+
+            elif msg_type == "reaction":
+                msg_id = payload.get("msg_id")
+                emoji = payload.get("emoji")
+                action = payload.get("action")  # "add" or "remove"
+
+                if msg_id and emoji:
+                    if action == "add":
+                        reactions = add_reaction(msg_id, emoji, username)
+                    else:
+                        reactions = remove_reaction(msg_id, emoji, username)
+
+                    # Broadcast updated reactions
+                    await broadcast(room, {
+                        "type": "reaction_update",
+                        "msg_id": msg_id,
+                        "reactions": reactions
+                    })
 
             elif msg_type == "ping":
                 await ws.send_json({"type": "pong"})
@@ -170,7 +250,9 @@ async def broadcast(room: str, payload: dict):
     if "timestamp" not in payload:
         payload["timestamp"] = datetime.now(timezone.utc).isoformat(timespec='seconds')
     if payload.get("type") in ["chat", "file", "system"]:
-        log_message(room, payload)
+        msg_id = log_message(room, payload)
+        if msg_id:
+            payload["id"] = msg_id
 
     conns = rooms.get(room, {}).copy()
     for w in conns:
@@ -250,3 +332,4 @@ async def delete_room(name: str, x_admin_token: str = Header(None)):
     delete_room_db(name)
 
     return {"ok": True, "deleted": name}
+    
