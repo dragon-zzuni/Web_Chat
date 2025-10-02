@@ -9,6 +9,10 @@ uploads/*
 ./data/*
 data/*
 
+# temp files
+.tmp/*
+tmp/*
+
 # passwords
 ./room_passwords.json
 
