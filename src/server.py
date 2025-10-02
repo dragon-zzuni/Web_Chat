@@ -16,7 +16,8 @@ from starlette.responses import Response as StarletteResponse
 from .database import (
     init_db, log_message, get_past_logs,
     add_room, get_room_password, get_all_rooms, delete_room_db, room_exists,
-    add_reaction, remove_reaction, get_message_by_id
+    add_reaction, remove_reaction, get_message_by_id,
+    set_pinned_message, get_pinned_message_id
 )
 
 from dotenv import load_dotenv
@@ -175,6 +176,23 @@ async def websocket_endpoint(ws: WebSocket):
                 payload["timestamp"] = ts if "T" in ts else f"{ts.replace(' ', 'T')}Z"
             await ws.send_json(payload)
 
+        # Send current pinned message (if any)
+        try:
+            pinned_id = get_pinned_message_id(room)
+            if pinned_id:
+                pinned = get_message_by_id(pinned_id)
+                if pinned:
+                    await ws.send_json({
+                        "type": "pin_update",
+                        "msg_id": pinned.get("id"),
+                        "from": pinned.get("username"),
+                        "message": pinned.get("message"),
+                        "color": pinned.get("color") or "#1a73e8",
+                        "timestamp": pinned.get("timestamp")
+                    })
+        except Exception:
+            pass
+
         rooms.setdefault(room, {})[ws] = username
         await broadcast(room, {"type": "system", "message": f"{username}님이 입장했습니다."})
         await broadcast_participants(room)
@@ -225,6 +243,32 @@ async def websocket_endpoint(ws: WebSocket):
                         "msg_id": msg_id,
                         "reactions": reactions
                     })
+
+            elif msg_type == "pin":
+                action = (payload.get("action") or "").lower()
+                if action == "set":
+                    msg_id = payload.get("msg_id")
+                    if msg_id:
+                        try:
+                            set_pinned_message(room, int(msg_id))
+                            pinned = get_message_by_id(int(msg_id))
+                            if pinned:
+                                await broadcast(room, {
+                                    "type": "pin_update",
+                                    "msg_id": pinned.get("id"),
+                                    "from": pinned.get("username"),
+                                    "message": pinned.get("message"),
+                                    "color": pinned.get("color") or "#1a73e8",
+                                    "timestamp": pinned.get("timestamp")
+                                })
+                        except Exception:
+                            pass
+                elif action == "clear":
+                    try:
+                        set_pinned_message(room, None)
+                        await broadcast(room, {"type": "pin_update", "msg_id": None})
+                    except Exception:
+                        pass
 
             elif msg_type == "ping":
                 await ws.send_json({"type": "pong"})

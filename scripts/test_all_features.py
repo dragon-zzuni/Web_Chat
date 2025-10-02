@@ -1,15 +1,36 @@
 """Test and capture all new features: dark mode, auto-reconnect, search"""
 from playwright.sync_api import sync_playwright
 import time
+import os
+import json
+import urllib.request
 
 ROOM = "비밀"
 PASSWORD = "qlalf"
 HOST = "125.7.235.198:8000"
 
+# Allow overriding host via env var (e.g., HOST=127.0.0.1:8000)
+HOST = os.environ.get("HOST", HOST)
+
 def test_features():
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
+        # Allow headless control via env (default headless in CI/agents)
+        headless_env = os.environ.get("HEADLESS", "1").strip()
+        headless = headless_env not in ("0", "false", "False")
+        browser = p.chromium.launch(headless=headless)
         page = browser.new_page(viewport={'width': 1400, 'height': 900})
+
+        # Optionally create room on target host (idempotent)
+        try:
+            req = urllib.request.Request(
+                url=f"http://{HOST}/api/rooms",
+                data=json.dumps({"name": ROOM, "password": PASSWORD}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=3)
+        except Exception:
+            pass  # ignore if it already exists or endpoint isn't reachable
 
         # Navigate and login
         page.goto(f"http://{HOST}/")
@@ -32,6 +53,9 @@ def test_features():
             page.fill('#msg', msg)
             page.click('#send')
             page.wait_for_timeout(800)
+
+        # Ensure output directory exists
+        os.makedirs('tmp', exist_ok=True)
 
         # 1. Test Search
         print("📸 Testing search...")

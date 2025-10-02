@@ -7,6 +7,7 @@ function initChat({room, name, password, hooks={}}) {
   let replyingTo = null; // {id, from, message} for reply feature
   let typingTimer = null;
   let typingUsers = new Set(); // Track who's typing
+  let currentPinnedId = null; // Pinned message id (room-scoped)
 
   const colorPicker = document.getElementById('nameColor');
   if (colorPicker) {
@@ -34,6 +35,53 @@ function initChat({room, name, password, hooks={}}) {
   const dropOverlay = document.getElementById('drop-overlay');
   const searchInput = document.getElementById('searchInput');
   const clearSearch = document.getElementById('clearSearch');
+
+  // Pinned message bar (in right pane, above controls)
+  const rightPane = document.querySelector('main.right');
+  let pinBar = document.getElementById('pinbar');
+  if (!pinBar) {
+    pinBar = document.createElement('div');
+    pinBar.id = 'pinbar';
+    pinBar.style.cssText = 'display:none;margin:8px 0;padding:8px 12px;border:1px solid var(--border);background:var(--chip);border-radius:10px;font-size:13px;color:var(--text);';
+    const inner = document.createElement('div');
+    inner.style.display = 'flex';
+    inner.style.alignItems = 'center';
+    inner.style.gap = '8px';
+    const icon = document.createElement('span');
+    icon.textContent = '📌';
+    const text = document.createElement('div');
+    text.id = 'pinbar-text';
+    text.style.flex = '1';
+    const btn = document.createElement('button');
+    btn.textContent = '고정 해제';
+    btn.style.cssText = 'border:1px solid var(--border);background:var(--bg);color:var(--text);padding:6px 10px;border-radius:8px;cursor:pointer;';
+    btn.onclick = () => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify({ type: 'pin', action: 'clear' }));
+    };
+    inner.appendChild(icon);
+    inner.appendChild(text);
+    inner.appendChild(btn);
+    pinBar.appendChild(inner);
+    if (rightPane) rightPane.prepend(pinBar);
+  }
+
+  function renderPinned(data) {
+    if (data && data.msg_id) {
+      currentPinnedId = data.msg_id;
+      const who = data.from ? `<b style="color:${esc(data.color||'#1a73e8')}">${esc(data.from)}</b>` : '';
+      const stamp = renderTimestamp(data.timestamp);
+      const snippet = (data.message || '').slice(0, 140);
+      const el = document.getElementById('pinbar-text');
+      if (el) el.innerHTML = `${stamp} ${who}: ${esc(snippet)}${(data.message||'').length>140?'...':''}`;
+      pinBar.style.display = '';
+    } else {
+      currentPinnedId = null;
+      const el = document.getElementById('pinbar-text');
+      if (el) el.textContent = '';
+      pinBar.style.display = 'none';
+    }
+  }
 
   const btnLeave  = document.getElementById('btnLeave');
   const btnRename = document.getElementById('btnRename');
@@ -234,11 +282,14 @@ function initChat({room, name, password, hooks={}}) {
   // Show context menu
   function showContextMenu(e, msgId, from, message) {
     e.preventDefault();
-
+    const isPinned = currentPinnedId && String(currentPinnedId) === String(msgId);
     contextMenu.innerHTML = `
       <div style="padding: 8px 12px; font-size: 12px; color: #666; border-bottom: 1px solid #f0f0f0; font-weight: 500;">메시지 작업</div>
       <button class="ctx-item" data-action="reply" style="width:100%;text-align:left;border:none;background:transparent;padding:8px 16px;cursor:pointer;font-size:14px;display:flex;align-items:center;gap:8px;">
         <span>↩️</span><span>답장하기</span>
+      </button>
+      <button class="ctx-item" data-action="${isPinned ? 'unpin' : 'pin'}" style="width:100%;text-align:left;border:none;background:transparent;padding:8px 16px;cursor:pointer;font-size:14px;display:flex;align-items:center;gap:8px;">
+        <span>📌</span><span>${isPinned ? '고정 해제' : '핀으로 고정'}</span>
       </button>
       <div style="border-top: 1px solid #f0f0f0; margin: 4px 0;"></div>
       <div style="padding: 4px 12px; font-size: 11px; color: #999;">빠른 반응</div>
@@ -271,6 +322,12 @@ function initChat({room, name, password, hooks={}}) {
         const action = item.getAttribute('data-action');
         if (action === 'reply') {
           window.setReplyTo(msgId, from, message);
+        } else if (action === 'pin') {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+          ws.send(JSON.stringify({ type: 'pin', action: 'set', msg_id: msgId }));
+        } else if (action === 'unpin') {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+          ws.send(JSON.stringify({ type: 'pin', action: 'clear' }));
         } else if (action === 'react') {
           const emoji = item.getAttribute('data-emoji');
           window.toggleReaction(msgId, emoji);
@@ -376,6 +433,10 @@ function initChat({room, name, password, hooks={}}) {
           updateTypingIndicator();
         }, 3000);
       }
+      return;
+    }
+    if (d.type === 'pin_update') {
+      renderPinned(d.msg_id ? d : null);
       return;
     }
     if (d.type === 'reaction_update') {

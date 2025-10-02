@@ -43,9 +43,16 @@ def init_db():
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS rooms (
         name TEXT PRIMARY KEY,
-        password TEXT NOT NULL
+        password TEXT NOT NULL,
+        pinned_message_id INTEGER
     )
     """)
+
+    # 마이그레이션: 기존 rooms 테이블에 pinned_message_id 컬럼 추가
+    try:
+        cursor.execute("ALTER TABLE rooms ADD COLUMN pinned_message_id INTEGER")
+    except sqlite3.OperationalError:
+        pass  # 이미 존재
 
     # rooms 테이블이 비어있으면 기본 방 추가
     cursor.execute("SELECT COUNT(*) FROM rooms")
@@ -146,6 +153,39 @@ def room_exists(name: str) -> bool:
     conn.close()
     return result is not None
 
+# --- Pinned Message Functions ---
+
+def set_pinned_message(room: str, msg_id: int | None):
+    """방에 고정된 메시지를 설정하거나 해제합니다."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE rooms SET pinned_message_id = ? WHERE name = ?", (msg_id, room))
+    conn.commit()
+    conn.close()
+
+    # Also ensure legacy DBs are migrated if present
+    try:
+        migrate_if_old_schema(DB_FILE)
+    except Exception:
+        pass
+    legacy_path = os.path.join("tmp", "data.db")
+    if os.path.exists(legacy_path):
+        try:
+            migrate_if_old_schema(legacy_path)
+        except Exception:
+            pass
+
+def get_pinned_message_id(room: str) -> int | None:
+    """방의 고정 메시지 ID를 반환합니다."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT pinned_message_id FROM rooms WHERE name = ?", (room,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return row[0]
+
 # --- Reaction Functions ---
 
 def add_reaction(msg_id: int, emoji: str, username: str):
@@ -207,3 +247,43 @@ def get_message_by_id(msg_id: int) -> Dict[str, Any] | None:
     conn.close()
 
     return dict(result) if result else None
+
+# --- Schema Migration Helpers ---
+
+def _get_columns(conn: sqlite3.Connection, table: str) -> set:
+    cur = conn.execute(f"PRAGMA table_info({table})")
+    return {row[1] for row in cur.fetchall()}
+
+def migrate_if_old_schema(db_path: str):
+    """
+    Ensure the SQLite database at db_path has all required columns.
+    Adds missing columns for backward compatibility with older schemas.
+    - chat_logs: reply_to_id, reactions
+    - rooms: pinned_message_id
+    """
+    os.makedirs(os.path.dirname(db_path or '.'), exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+
+        # chat_logs table may be missing new columns in older DBs
+        try:
+            cols = _get_columns(conn, 'chat_logs')
+            if 'reply_to_id' not in cols:
+                cur.execute("ALTER TABLE chat_logs ADD COLUMN reply_to_id INTEGER")
+            if 'reactions' not in cols:
+                cur.execute("ALTER TABLE chat_logs ADD COLUMN reactions TEXT DEFAULT '{}' ")
+        except sqlite3.OperationalError:
+            pass
+
+        # rooms table: ensure pinned_message_id exists
+        try:
+            cols = _get_columns(conn, 'rooms')
+            if 'pinned_message_id' not in cols:
+                cur.execute("ALTER TABLE rooms ADD COLUMN pinned_message_id INTEGER")
+        except sqlite3.OperationalError:
+            pass
+
+        conn.commit()
+    finally:
+        conn.close()
